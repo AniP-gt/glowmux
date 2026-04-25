@@ -1,9 +1,13 @@
+mod ai_invoke;
+mod ai_title;
 mod app;
 mod claude_monitor;
 mod config;
 mod filetree;
+mod hooks;
 mod pane;
 mod preview;
+mod runtime;
 mod ui;
 mod version_check;
 
@@ -49,6 +53,9 @@ fn main() -> Result<()> {
         default_hook(info);
     }));
 
+    // Initialize async runtime BEFORE raw mode
+    let async_runtime = runtime::AsyncRuntime::new()?;
+
     // Query terminal for graphics protocol support BEFORE raw mode.
     // Falls back to halfblocks if detection fails.
     let image_picker = Some(
@@ -75,6 +82,16 @@ fn main() -> Result<()> {
     // Create app
     let mut app = app::App::new(size.height, size.width, config)?;
     app.image_picker = image_picker;
+    app.tokio_handle = async_runtime.handle();
+
+    // Start hook server on async runtime
+    if let Some(socket_path) = hooks::socket_path() {
+        let tx = app.event_tx.clone();
+        async_runtime.spawn(hooks::start_hook_server(tx, socket_path));
+    }
+
+    // Keep runtime alive for the lifetime of the app
+    let _async_runtime = async_runtime;
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app);
