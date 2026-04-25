@@ -198,7 +198,7 @@ impl ClaudeMonitor {
             let path_missing = monitor
                 .jsonl_path
                 .as_ref()
-                .map_or(true, |p| !p.exists());
+                .is_none_or(|p| !p.exists());
             let stale_scan = monitor.last_rescan.elapsed() > Duration::from_secs(5);
             if path_missing || stale_scan {
                 monitor.last_rescan = Instant::now();
@@ -489,7 +489,7 @@ fn find_jsonl_path(cwd: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(&project_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "jsonl") {
+        if path.extension().is_some_and(|e| e == "jsonl") {
             if let Ok(meta) = entry.metadata() {
                 if let Ok(mtime) = meta.modified() {
                     match &latest {

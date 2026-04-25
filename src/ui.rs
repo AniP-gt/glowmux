@@ -1,7 +1,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph};
+use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, DragTarget, FocusTarget};
@@ -80,6 +80,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_main_area(app, frame, chunks[1]);
     if show_status {
         render_status_bar(app, frame, chunks[2]);
+    }
+
+    if app.layout_picker.visible {
+        render_layout_picker(app, frame, area);
     }
 }
 
@@ -536,7 +540,7 @@ fn render_terminal_content(
                 };
 
                 // Apply selection highlight (only if dragged, not single click)
-                let has_selection = selection.map_or(false, |s| {
+                let has_selection = selection.is_some_and(|s| {
                     let (sr, sc, er, ec) = s.normalized();
                     (sr != er || sc != ec) && s.contains(row as u32, col as u32)
                 });
@@ -896,7 +900,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         .ws()
         .panes
         .get(&focused_id)
-        .map_or(false, |p| p.is_claude_running());
+        .is_some_and(|p| p.is_claude_running());
 
     let mut right_spans = Vec::new();
 
@@ -1020,4 +1024,84 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
         vt100::Color::Idx(idx) => Color::Indexed(idx),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
+    let dialog_width = 52u16;
+    let dialog_height = 14u16;
+
+    let x = area.x + area.width.saturating_sub(dialog_width) / 2;
+    let y = area.y + area.height.saturating_sub(dialog_height) / 2;
+    let dialog_rect = Rect::new(
+        x,
+        y,
+        dialog_width.min(area.width),
+        dialog_height.min(area.height),
+    );
+
+    frame.render_widget(Clear, dialog_rect);
+
+    let pane_count = app.ws().layout.pane_count();
+    let selected = app.layout_picker.selected;
+
+    let labels = [
+        "[1] Stack",
+        "[2] Two Split",
+        "[3] Grid",
+        "[4] Main+Sub",
+        "[5] Big1+3",
+        "[6] Auto",
+    ];
+    let min_counts = [1usize, 2, 4, 3, 4, 1];
+
+    let outer_block = Block::default()
+        .title(" Layout Picker ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FOCUS_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    frame.render_widget(outer_block, dialog_rect);
+
+    let inner = Rect::new(
+        dialog_rect.x + 2,
+        dialog_rect.y + 1,
+        dialog_rect.width.saturating_sub(4),
+        dialog_rect.height.saturating_sub(2),
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, label) in labels.iter().enumerate() {
+        let available = pane_count >= min_counts[i];
+        let style = if !available {
+            Style::default().fg(TEXT_DIM)
+        } else if selected == i {
+            Style::default()
+                .fg(Color::Black)
+                .bg(FOCUS_BORDER)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+
+        let marker = if selected == i { " > " } else { "   " };
+        let suffix = if !available { " (need more panes)" } else { "" };
+
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+            Span::styled(*label, style),
+            Span::styled(suffix, Style::default().fg(TEXT_DIM)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " 1-6: select  j/k: move  Enter: apply  Esc: close",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
 }

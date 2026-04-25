@@ -60,7 +60,7 @@ impl Pane {
         let work_dir = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         cmd.cwd(&work_dir);
         cmd.env("TERM", "xterm-256color");
-        cmd.env("CCMUX", "1"); // marker to detect nested ccmux
+        cmd.env("GLOWMUX", "1"); // marker to detect nested glowmux
 
         let child = pair
             .slave
@@ -111,15 +111,15 @@ impl Pane {
         // Leading space prevents it from appearing in bash history
         if shell_name.contains("bash") {
             let setup = concat!(
-                " __ccmux_osc7() { printf '\\033]7;file://%s%s\\007' \"$HOSTNAME\" \"$PWD\"; };",
-                " PROMPT_COMMAND=\"__ccmux_osc7;${PROMPT_COMMAND}\";",
+                " __glowmux_osc7() { printf '\\033]7;file://%s%s\\007' \"$HOSTNAME\" \"$PWD\"; };",
+                " PROMPT_COMMAND=\"__glowmux_osc7;${PROMPT_COMMAND}\";",
                 " clear\n",
             );
             let _ = pane.write_input(setup.as_bytes());
         } else if shell_name.contains("zsh") {
             let setup = concat!(
-                " __ccmux_osc7() { printf '\\033]7;file://%s%s\\007' \"$HOST\" \"$PWD\"; };",
-                " precmd_functions+=(__ccmux_osc7);",
+                " __glowmux_osc7() { printf '\\033]7;file://%s%s\\007' \"$HOST\" \"$PWD\"; };",
+                " precmd_functions+=(__glowmux_osc7);",
                 " clear\n",
             );
             let _ = pane.write_input(setup.as_bytes());
