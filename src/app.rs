@@ -37,6 +37,23 @@ pub enum FocusTarget {
     Preview,
 }
 
+/// Layout mode for the workspace.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayoutMode {
+    Stack,
+    TwoSplit,
+    Grid,
+    MainSub,
+    BigOnePlusThree,
+    Auto,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LayoutPickerState {
+    pub visible: bool,
+    pub selected: usize,
+}
+
 /// Direction for pane focus movement.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Direction {
@@ -315,6 +332,7 @@ pub struct Workspace {
     pub last_pane_rects: Vec<(usize, Rect)>,
     pub last_file_tree_rect: Option<Rect>,
     pub last_preview_rect: Option<Rect>,
+    pub layout_mode: LayoutMode,
 }
 
 impl Workspace {
@@ -344,6 +362,7 @@ impl Workspace {
             last_pane_rects: Vec::new(),
             last_file_tree_rect: None,
             last_preview_rect: None,
+            layout_mode: LayoutMode::Auto,
         })
     }
 
@@ -415,6 +434,7 @@ pub struct App {
     pub config: ConfigFile,
     pub zoomed_pane_id: Option<usize>,
     pub pre_zoom_layout: Option<LayoutNode>,
+    pub layout_picker: LayoutPickerState,
 }
 
 impl App {
@@ -462,6 +482,7 @@ impl App {
             config,
             zoomed_pane_id: None,
             pre_zoom_layout: None,
+            layout_picker: LayoutPickerState::default(),
         };
 
         if app.config.startup.enabled && app.config.startup.panes.len() > 1 {
@@ -599,6 +620,11 @@ impl App {
             return Ok(self.handle_rename_key(key));
         }
 
+        // Layout picker mode
+        if self.layout_picker.visible {
+            return self.handle_layout_picker_key(key);
+        }
+
         // Ctrl+Q — quit
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
             self.should_quit = true;
@@ -689,6 +715,22 @@ impl App {
         {
             self.toggle_zoom();
             return Ok(true);
+        }
+
+        // Ctrl+Space — cycle layout mode
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(' ') {
+            self.cycle_layout_mode();
+            return Ok(true);
+        }
+
+        // Ctrl+L — toggle layout picker
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('l') {
+            if self.ws().layout.pane_count() > 1 {
+                self.layout_picker.visible = true;
+                self.layout_picker.selected = 0;
+                return Ok(true);
+            }
+            return Ok(false);
         }
 
         // Alt+1 .. Alt+9 — jump to tab N
@@ -1041,6 +1083,31 @@ impl App {
         // in it immediately after splitting.
         ws.focused_pane_id = new_id;
 
+        // Auto-responsive: apply layout based on terminal width when in Auto mode
+        if self.ws().layout_mode == LayoutMode::Auto && self.config.layout.auto_responsive {
+            let cols = self.last_term_size.0;
+            let breakpoint_stack = self.config.layout.breakpoint_stack;
+            let breakpoint_split2 = self.config.layout.breakpoint_split2;
+            let pane_count = self.ws().layout.pane_count();
+
+            if pane_count >= 2 {
+                let responsive_mode = if cols < breakpoint_stack {
+                    LayoutMode::Stack
+                } else if cols < breakpoint_split2 {
+                    LayoutMode::TwoSplit
+                } else if pane_count >= 4 {
+                    LayoutMode::Grid
+                } else {
+                    LayoutMode::TwoSplit
+                };
+
+                let pane_ids = self.ws().layout.collect_pane_ids();
+                if let Some(new_layout) = Self::build_layout_node(responsive_mode, &pane_ids) {
+                    self.ws_mut().layout = new_layout;
+                }
+            }
+        }
+
         self.mark_layout_change();
         Ok(())
     }
@@ -1104,6 +1171,235 @@ impl App {
             }
         }
         self.mark_layout_change();
+    }
+
+    pub fn apply_layout_mode(&mut self, mode: LayoutMode) {
+        let pane_ids = self.ws().layout.collect_pane_ids();
+        if pane_ids.is_empty() {
+            return;
+        }
+
+        let new_layout = Self::build_layout_node(mode, &pane_ids);
+        if let Some(layout) = new_layout {
+            self.ws_mut().layout = layout;
+            self.ws_mut().layout_mode = mode;
+            self.mark_layout_change();
+        }
+    }
+
+    fn build_layout_node(mode: LayoutMode, pane_ids: &[usize]) -> Option<LayoutNode> {
+        let count = pane_ids.len();
+        if count == 0 {
+            return None;
+        }
+        if count == 1 {
+            return Some(LayoutNode::Leaf { pane_id: pane_ids[0] });
+        }
+
+        match mode {
+            LayoutMode::Stack | LayoutMode::Auto => {
+                Self::build_stack(pane_ids, SplitDirection::Horizontal)
+            }
+            LayoutMode::TwoSplit => {
+                let left = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                let right = if count == 2 {
+                    LayoutNode::Leaf { pane_id: pane_ids[1] }
+                } else {
+                    Self::build_stack(&pane_ids[1..], SplitDirection::Horizontal)
+                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] })
+                };
+                Some(LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(left),
+                    second: Box::new(right),
+                })
+            }
+            LayoutMode::Grid => {
+                if count >= 4 {
+                    let top = LayoutNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.5,
+                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
+                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+                    };
+                    let bottom = LayoutNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.5,
+                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[2] }),
+                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[3] }),
+                    };
+                    Some(LayoutNode::Split {
+                        direction: SplitDirection::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(top),
+                        second: Box::new(bottom),
+                    })
+                } else if count == 3 {
+                    let top = LayoutNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.5,
+                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
+                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+                    };
+                    Some(LayoutNode::Split {
+                        direction: SplitDirection::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(top),
+                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[2] }),
+                    })
+                } else {
+                    Self::build_layout_node(LayoutMode::TwoSplit, pane_ids)
+                }
+            }
+            LayoutMode::MainSub => {
+                if count >= 3 {
+                    let main = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                    let sub = Self::build_stack(&pane_ids[1..], SplitDirection::Horizontal)
+                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] });
+                    Some(LayoutNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.6,
+                        first: Box::new(main),
+                        second: Box::new(sub),
+                    })
+                } else {
+                    Self::build_layout_node(LayoutMode::TwoSplit, pane_ids)
+                }
+            }
+            LayoutMode::BigOnePlusThree => {
+                if count >= 4 {
+                    let big = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                    let small = Self::build_stack(&pane_ids[1..4], SplitDirection::Horizontal)
+                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] });
+                    Some(LayoutNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.65,
+                        first: Box::new(big),
+                        second: Box::new(small),
+                    })
+                } else if count == 3 {
+                    Self::build_layout_node(LayoutMode::MainSub, pane_ids)
+                } else {
+                    Self::build_layout_node(LayoutMode::TwoSplit, pane_ids)
+                }
+            }
+        }
+    }
+
+    fn build_stack(pane_ids: &[usize], direction: SplitDirection) -> Option<LayoutNode> {
+        match pane_ids.len() {
+            0 => None,
+            1 => Some(LayoutNode::Leaf { pane_id: pane_ids[0] }),
+            2 => Some(LayoutNode::Split {
+                direction,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
+                second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+            }),
+            _ => {
+                let mid = pane_ids.len() / 2;
+                let first = Self::build_stack(&pane_ids[..mid], direction)?;
+                let second = Self::build_stack(&pane_ids[mid..], direction)?;
+                Some(LayoutNode::Split {
+                    direction,
+                    ratio: mid as f32 / pane_ids.len() as f32,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                })
+            }
+        }
+    }
+
+    fn cycle_layout_mode(&mut self) {
+        let count = self.ws().layout.pane_count();
+        if count <= 1 {
+            return;
+        }
+
+        let current = self.ws().layout_mode;
+        let modes: &[LayoutMode] = if count == 2 {
+            &[LayoutMode::Stack, LayoutMode::TwoSplit]
+        } else if count == 3 {
+            &[LayoutMode::Stack, LayoutMode::TwoSplit, LayoutMode::MainSub]
+        } else {
+            &[
+                LayoutMode::Stack,
+                LayoutMode::TwoSplit,
+                LayoutMode::Grid,
+                LayoutMode::MainSub,
+                LayoutMode::BigOnePlusThree,
+            ]
+        };
+
+        let next = if current == LayoutMode::Auto {
+            modes[0]
+        } else {
+            modes
+                .iter()
+                .position(|&m| m == current)
+                .map(|idx| modes[(idx + 1) % modes.len()])
+                .unwrap_or(modes[0])
+        };
+
+        self.apply_layout_mode(next);
+    }
+
+    fn handle_layout_picker_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Char('1')) => {
+                self.apply_layout_mode(LayoutMode::Stack);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('2')) => {
+                self.apply_layout_mode(LayoutMode::TwoSplit);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('3')) => {
+                self.apply_layout_mode(LayoutMode::Grid);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('4')) => {
+                self.apply_layout_mode(LayoutMode::MainSub);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('5')) => {
+                self.apply_layout_mode(LayoutMode::BigOnePlusThree);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('6')) => {
+                self.apply_layout_mode(LayoutMode::Auto);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Esc)
+            | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('j')) | (KeyModifiers::NONE, KeyCode::Down) => {
+                self.layout_picker.selected = (self.layout_picker.selected + 1) % 6;
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k')) | (KeyModifiers::NONE, KeyCode::Up) => {
+                self.layout_picker.selected = self.layout_picker.selected.saturating_sub(1);
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => {
+                let mode = match self.layout_picker.selected {
+                    0 => LayoutMode::Stack,
+                    1 => LayoutMode::TwoSplit,
+                    2 => LayoutMode::Grid,
+                    3 => LayoutMode::MainSub,
+                    4 => LayoutMode::BigOnePlusThree,
+                    _ => LayoutMode::Auto,
+                };
+                self.apply_layout_mode(mode);
+                self.layout_picker.visible = false;
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
+                self.layout_picker.selected = (self.layout_picker.selected + 1) % 6;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
     }
 
     fn apply_startup_panes(&mut self, rows: u16, cols: u16) -> Result<()> {
