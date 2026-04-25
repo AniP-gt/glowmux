@@ -37,6 +37,15 @@ pub enum FocusTarget {
     Preview,
 }
 
+/// Direction for pane focus movement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// Which border is being dragged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DragTarget {
@@ -694,6 +703,29 @@ impl App {
             }
         }
 
+        // Alt+h/j/k/l — directional pane focus
+        if key.modifiers == KeyModifiers::ALT && self.ws().focus_target == FocusTarget::Pane {
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Char('H') => {
+                    self.focus_pane_in_direction(Direction::Left);
+                    return Ok(true);
+                }
+                KeyCode::Char('j') | KeyCode::Char('J') => {
+                    self.focus_pane_in_direction(Direction::Down);
+                    return Ok(true);
+                }
+                KeyCode::Char('k') | KeyCode::Char('K') => {
+                    self.focus_pane_in_direction(Direction::Up);
+                    return Ok(true);
+                }
+                KeyCode::Char('l') | KeyCode::Char('L') => {
+                    self.focus_pane_in_direction(Direction::Right);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         // Ctrl+Right — next pane
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Right {
             self.focus_next_pane();
@@ -1119,6 +1151,53 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn focus_pane_in_direction(&mut self, dir: Direction) {
+        let focused = self.ws().focused_pane_id;
+
+        let Some(&(_, current_rect)) = self.ws().last_pane_rects.iter()
+            .find(|(id, _)| *id == focused)
+        else {
+            return;
+        };
+
+        let cx = current_rect.x as i32 + current_rect.width as i32 / 2;
+        let cy = current_rect.y as i32 + current_rect.height as i32 / 2;
+
+        let mut best_id: Option<usize> = None;
+        let mut best_dist = i32::MAX;
+
+        for &(pane_id, rect) in &self.ws().last_pane_rects {
+            if pane_id == focused {
+                continue;
+            }
+
+            let px = rect.x as i32 + rect.width as i32 / 2;
+            let py = rect.y as i32 + rect.height as i32 / 2;
+
+            let is_candidate = match dir {
+                Direction::Left  => px < cx && rect.x as i32 + rect.width as i32 <= current_rect.x as i32 + 2,
+                Direction::Right => px > cx && rect.x as i32 >= current_rect.x as i32 + current_rect.width as i32 - 2,
+                Direction::Up    => py < cy && rect.y as i32 + rect.height as i32 <= current_rect.y as i32 + 2,
+                Direction::Down  => py > cy && rect.y as i32 >= current_rect.y as i32 + current_rect.height as i32 - 2,
+            };
+
+            if !is_candidate {
+                continue;
+            }
+
+            let dist = (px - cx).abs() + (py - cy).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_id = Some(pane_id);
+            }
+        }
+
+        if let Some(new_id) = best_id {
+            self.ws_mut().focused_pane_id = new_id;
+            self.dirty = true;
+        }
     }
 
     /// Cycle focus forward: FileTree → Preview → Pane1 → Pane2 → ... → FileTree
