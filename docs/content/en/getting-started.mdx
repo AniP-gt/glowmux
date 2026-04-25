@@ -1,0 +1,91 @@
+# Getting Started
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) (for npm install)
+- A terminal emulator (Windows Terminal, iTerm2, etc.)
+- On Windows: [Git for Windows](https://git-scm.com/download/win) (includes Git Bash, recommended for cd tracking)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (optional, but that's the point)
+
+Only needed when building from source: [Rust toolchain](https://rustup.rs/).
+
+## Installation
+
+### Via npm (recommended)
+
+```bash
+npm install -g ccmux-cli
+```
+
+Requires Node.js. After install, use the `ccmux` command from anywhere.
+
+### Download binary
+
+Download the latest binary from [Releases](https://github.com/Shin-sibainu/ccmux/releases):
+
+| Platform | File |
+|----------|------|
+| Windows (x64) | `ccmux-windows-x64.exe` |
+| macOS (Apple Silicon) | `ccmux-macos-arm64` |
+| macOS (Intel) | `ccmux-macos-x64` |
+| Linux (x64) | `ccmux-linux-x64` |
+
+import { Callout } from 'nextra/components'
+
+<Callout type="warning">
+  **Windows:** Microsoft Defender SmartScreen may show a warning because the binary is not code-signed. Click "More info" → "Run anyway" to proceed. This is normal for unsigned open-source software.
+</Callout>
+
+<Callout type="info">
+  **macOS / Linux:** After downloading, make the binary executable: `chmod +x ccmux-*`
+</Callout>
+
+### From source
+
+```bash
+git clone https://github.com/Shin-sibainu/ccmux.git
+cd ccmux
+cargo build --release
+```
+
+The binary will be at `target/release/ccmux` (or `ccmux.exe` on Windows).
+
+## First launch
+
+```bash
+ccmux
+```
+
+You'll see a terminal pane with your shell, a file tree sidebar on the left, and a status bar at the bottom.
+
+## Basic workflow
+
+### 1. Start Claude Code
+
+Type `claude` in the terminal pane. The pane border will turn orange to indicate Claude Code is running.
+
+### 2. Split panes
+
+Press `Ctrl+D` to split vertically, or `Ctrl+E` to split horizontally. Each new pane gets its own independent shell.
+
+### 3. Browse files
+
+Press `Ctrl+F` to focus the file tree. Navigate with `j`/`k` and press `Enter` to preview a file with syntax highlighting.
+
+### 4. Switch between panes
+
+Use `Ctrl+Right` / `Ctrl+Left` to cycle through sidebar, preview, and terminal panes. Or just click.
+
+### 5. Quit
+
+Press `Ctrl+Q` to quit ccmux. All shells are terminated cleanly.
+
+## Shell detection
+
+ccmux automatically detects your shell:
+
+| Platform | Priority |
+|----------|----------|
+| **Windows** | Git Bash → PowerShell |
+| **macOS** | `$SHELL` (usually zsh) |
+| **Linux** | `$SHELL` (usually bash) |

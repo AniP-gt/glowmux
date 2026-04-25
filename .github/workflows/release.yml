@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: ccmux-windows-x64.exe
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: ccmux-macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: ccmux-macos-arm64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: ccmux-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: cp target/${{ matrix.target }}/release/ccmux ${{ matrix.artifact }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: cp target/${{ matrix.target }}/release/ccmux.exe ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum ccmux-windows-x64.exe/ccmux-windows-x64.exe \
+                    ccmux-macos-x64/ccmux-macos-x64 \
+                    ccmux-macos-arm64/ccmux-macos-arm64 \
+                    ccmux-linux-x64/ccmux-linux-x64 \
+            | sed 's|[^ ]*/||' > ../checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/ccmux-windows-x64.exe/ccmux-windows-x64.exe
+            artifacts/ccmux-macos-x64/ccmux-macos-x64
+            artifacts/ccmux-macos-arm64/ccmux-macos-arm64
+            artifacts/ccmux-linux-x64/ccmux-linux-x64
+            checksums.txt
+
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 24 (includes npm 11)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify npm version
+        run: npm --version
+
+      - name: Publish to npm via Trusted Publishing
+        working-directory: npm
+        run: npm publish --access public

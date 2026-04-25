@@ -1,0 +1,78 @@
+name: Deploy Docs + LP + Blog
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'docs/**'
+      - 'lp/**'
+      - 'blog/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: npm ci
+
+      - name: Build Nextra docs
+        working-directory: docs
+        run: npx next build
+
+      - name: Install blog dependencies
+        working-directory: blog
+        run: npm ci
+
+      - name: Build Astro blog
+        working-directory: blog
+        run: npx astro build
+        env:
+          NODE_ENV: production
+
+      - name: Stage Pages artifact
+        run: |
+          mkdir -p _site
+          # LP at site root
+          cp -R lp/. _site/
+          # Nextra docs at /docs/
+          mkdir -p _site/docs
+          cp -R docs/out/. _site/docs/
+          # Astro blog at /blog/
+          mkdir -p _site/blog
+          cp -R blog/dist/. _site/blog/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
