@@ -1,5 +1,6 @@
 mod app;
 mod claude_monitor;
+mod config;
 mod filetree;
 mod pane;
 mod preview;
@@ -20,10 +21,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 fn main() -> Result<()> {
-    // Detect if running inside another ccmux instance
-    if std::env::var("CCMUX").is_ok() {
-        eprintln!("ccmux: already running inside a ccmux pane (nested instance not allowed).");
-        eprintln!("       Open a new tab with Alt+T (or Ctrl+T) or split with Ctrl+D / Ctrl+E instead.");
+    // Detect if running inside another glowmux instance
+    if std::env::var("GLOWMUX").is_ok() {
+        eprintln!("glowmux: already running inside a glowmux pane (nested instance not allowed).");
+        eprintln!("         Open a new tab with Alt+T (or Ctrl+T) or split with Ctrl+D / Ctrl+E instead.");
         std::process::exit(1);
     }
 
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
         if path.is_dir() {
             std::env::set_current_dir(path)?;
         } else {
-            eprintln!("ccmux: not a directory: {}", dir);
+            eprintln!("glowmux: not a directory: {}", dir);
             std::process::exit(1);
         }
     }
@@ -68,8 +69,11 @@ fn main() -> Result<()> {
     // Get initial terminal size
     let size = terminal.size()?;
 
+    // Load configuration
+    let config = config::ConfigFile::load();
+
     // Create app
-    let mut app = app::App::new(size.height, size.width)?;
+    let mut app = app::App::new(size.height, size.width, config)?;
     app.image_picker = image_picker;
 
     // Main event loop
@@ -103,10 +107,8 @@ fn run_event_loop(
         app.drain_pty_events();
 
         // Auto-refresh file tree if sidebar is visible
-        if app.ws().file_tree_visible {
-            if app.ws_mut().file_tree.auto_refresh_if_needed() {
-                app.dirty = true;
-            }
+        if app.ws().file_tree_visible && app.ws_mut().file_tree.auto_refresh_if_needed() {
+            app.dirty = true;
         }
 
         // After paste, wait a few frames for PTY echo to settle
