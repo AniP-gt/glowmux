@@ -420,7 +420,7 @@ impl App {
 
         let ws = Workspace::new(name, cwd, 1, pane_rows, pane_cols, event_tx.clone())?;
 
-        Ok(Self {
+        let mut app = Self {
             workspaces: vec![ws],
             active_tab: 0,
             should_quit: false,
@@ -453,7 +453,13 @@ impl App {
             config,
             zoomed_pane_id: None,
             pre_zoom_layout: None,
-        })
+        };
+
+        if app.config.startup.enabled && app.config.startup.panes.len() > 1 {
+            app.apply_startup_panes(pane_rows, pane_cols)?;
+        }
+
+        Ok(app)
     }
 
     /// Copy text to clipboard, reusing the handle if available.
@@ -1066,6 +1072,53 @@ impl App {
             }
         }
         self.mark_layout_change();
+    }
+
+    fn apply_startup_panes(&mut self, rows: u16, cols: u16) -> Result<()> {
+        let pane_configs = self.config.startup.panes.clone();
+
+        for (i, startup_pane) in pane_configs.iter().enumerate().skip(1) {
+            let new_id = self.next_pane_id;
+            self.next_pane_id = self.next_pane_id.wrapping_add(1);
+
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let pane = Pane::new_with_cwd(new_id, rows, cols, self.event_tx.clone(), Some(cwd))?;
+
+            let focused = self.ws().focused_pane_id;
+            let ws = self.ws_mut();
+            ws.panes.insert(new_id, pane);
+
+            let direction = if i % 2 == 1 {
+                SplitDirection::Vertical
+            } else {
+                SplitDirection::Horizontal
+            };
+            ws.layout.split_pane(focused, new_id, direction);
+            ws.focused_pane_id = new_id;
+
+            if !startup_pane.command.is_empty() {
+                let cmd = format!("{}\r", startup_pane.command);
+                if let Some(p) = ws.panes.get_mut(&new_id) {
+                    let _ = p.write_input(cmd.as_bytes());
+                }
+            }
+        }
+
+        if let Some(first) = pane_configs.first() {
+            if !first.command.is_empty() {
+                let first_id = self.workspaces[0].layout.collect_pane_ids()[0];
+                let cmd = format!("{}\r", first.command);
+                if let Some(p) = self.ws_mut().panes.get_mut(&first_id) {
+                    let _ = p.write_input(cmd.as_bytes());
+                }
+            }
+        }
+
+        if let Some(&first_id) = self.ws().layout.collect_pane_ids().first() {
+            self.ws_mut().focused_pane_id = first_id;
+        }
+
+        Ok(())
     }
 
     /// Cycle focus forward: FileTree → Preview → Pane1 → Pane2 → ... → FileTree
