@@ -14,9 +14,10 @@ pub struct ConfigFile {
     pub worktree: WorktreeConfig,
     pub session: SessionConfig,
     pub keybindings: KeybindingsConfig,
+    pub ai_title_engine: AiTitleEngineConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FeaturesConfig {
     pub ai_title: bool,
@@ -24,6 +25,50 @@ pub struct FeaturesConfig {
     pub auto_worktree: bool,
     pub session_restore: bool,
     pub feature_toggle_ui: bool,
+    pub status_dot: bool,
+    pub status_bg_color: bool,
+    pub status_bar: bool,
+    pub zoom: bool,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self {
+            ai_title: true,
+            ai_worktree_name: false,
+            auto_worktree: false,
+            session_restore: false,
+            feature_toggle_ui: false,
+            status_dot: true,
+            status_bg_color: true,
+            status_bar: true,
+            zoom: true,
+        }
+    }
+}
+
+impl FeaturesConfig {
+    pub fn get_by_key(&self, key: &str) -> bool {
+        match key {
+            "status_dot" => self.status_dot,
+            "status_bg_color" => self.status_bg_color,
+            "status_bar" => self.status_bar,
+            "ai_title" => self.ai_title,
+            "zoom" => self.zoom,
+            _ => false,
+        }
+    }
+
+    pub fn set_by_key(&mut self, key: &str, value: bool) {
+        match key {
+            "status_dot" => self.status_dot = value,
+            "status_bg_color" => self.status_bg_color = value,
+            "status_bar" => self.status_bar = value,
+            "ai_title" => self.ai_title = value,
+            "zoom" => self.zoom = value,
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -204,9 +249,29 @@ impl Default for AiConfig {
 impl Default for AiTitleConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             model: String::new(),
             prompt: "Generate a short title for this terminal session".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiTitleEngineConfig {
+    pub backend: String,
+    pub max_chars: usize,
+    pub timeout_sec: u64,
+    pub update_interval_sec: u64,
+}
+
+impl Default for AiTitleEngineConfig {
+    fn default() -> Self {
+        Self {
+            backend: "claude-headless".to_string(),
+            max_chars: 20,
+            timeout_sec: 5,
+            update_interval_sec: 30,
         }
     }
 }
@@ -333,7 +398,11 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ConfigFile::default();
-        assert!(!config.features.ai_title);
+        assert!(config.features.ai_title);
+        assert!(config.features.status_dot);
+        assert!(config.features.status_bg_color);
+        assert!(config.features.status_bar);
+        assert!(config.features.zoom);
         assert_eq!(config.terminal.scrollback, 10000);
         assert_eq!(config.layout.breakpoint_stack, 120);
         assert_eq!(config.ai.provider, "ollama");
@@ -347,11 +416,11 @@ mod tests {
 scrollback = 5000
 
 [features]
-ai_title = true
+ai_title = false
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(config.terminal.scrollback, 5000);
-        assert!(config.features.ai_title);
+        assert!(!config.features.ai_title);
         assert!(!config.features.auto_worktree);
         assert_eq!(config.layout.file_tree_width, 20);
     }
