@@ -7,6 +7,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
+use crate::config::ConfigFile;
 use crate::filetree::FileTree;
 use crate::pane::Pane;
 use crate::preview::Preview;
@@ -174,6 +175,18 @@ impl LayoutNode {
             } else {
                 first.update_ratio(&path[1..], new_ratio);
             }
+        }
+    }
+
+    pub fn clone_layout(&self) -> LayoutNode {
+        match self {
+            LayoutNode::Leaf { pane_id } => LayoutNode::Leaf { pane_id: *pane_id },
+            LayoutNode::Split { direction, ratio, first, second } => LayoutNode::Split {
+                direction: *direction,
+                ratio: *ratio,
+                first: Box::new(first.clone_layout()),
+                second: Box::new(second.clone_layout()),
+            },
         }
     }
 
@@ -389,10 +402,14 @@ pub struct App {
     clipboard: Option<arboard::Clipboard>,
     // Image preview protocol picker
     pub image_picker: Option<ratatui_image::picker::Picker>,
+    #[allow(dead_code)]
+    pub config: ConfigFile,
+    pub zoomed_pane_id: Option<usize>,
+    pub pre_zoom_layout: Option<LayoutNode>,
 }
 
 impl App {
-    pub fn new(rows: u16, cols: u16) -> Result<Self> {
+    pub fn new(rows: u16, cols: u16, config: ConfigFile) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel();
 
         let pane_rows = rows.saturating_sub(5); // title + tab bar + status + borders
@@ -414,8 +431,8 @@ impl App {
             paste_cooldown: 0,
             resize_cooldown: 0,
             last_term_size: (cols, rows),
-            file_tree_width: 20,
-            preview_width: 40,
+            file_tree_width: config.layout.file_tree_width,
+            preview_width: config.layout.preview_width,
             layout_swapped: true,
             status_bar_visible: true,
             dragging: None,
@@ -433,6 +450,9 @@ impl App {
             claude_monitor: crate::claude_monitor::ClaudeMonitor::new(),
             clipboard: None,
             image_picker: None,
+            config,
+            zoomed_pane_id: None,
+            pre_zoom_layout: None,
         })
     }
 
@@ -645,6 +665,14 @@ impl App {
         {
             self.status_bar_visible = !self.status_bar_visible;
             self.mark_layout_change();
+            return Ok(true);
+        }
+
+        // Alt+Z — toggle pane zoom
+        if key.modifiers == KeyModifiers::ALT
+            && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
+        {
+            self.toggle_zoom();
             return Ok(true);
         }
 
@@ -933,6 +961,9 @@ impl App {
     const MIN_PANE_HEIGHT: u16 = 5;
 
     fn split_focused_pane(&mut self, direction: SplitDirection) -> Result<()> {
+        if self.zoomed_pane_id.is_some() {
+            return Ok(());
+        }
         if self.ws().layout.pane_count() >= Self::MAX_PANES {
             return Ok(());
         }
@@ -977,6 +1008,14 @@ impl App {
     }
 
     fn close_focused_pane(&mut self) {
+        // If zoomed, restore the saved layout first so remove_pane operates on the
+        // real multi-pane tree, not the single-leaf zoom overlay.
+        if self.zoomed_pane_id.is_some() {
+            if let Some(saved_layout) = self.pre_zoom_layout.take() {
+                self.ws_mut().layout = saved_layout;
+            }
+            self.zoomed_pane_id = None;
+        }
         let focused = self.ws().focused_pane_id;
         let ws = self.ws_mut();
         if ws.layout.pane_count() <= 1 {
@@ -1008,6 +1047,24 @@ impl App {
             ws.focused_pane_id = first;
         }
 
+        self.mark_layout_change();
+    }
+
+    fn toggle_zoom(&mut self) {
+        if self.zoomed_pane_id.is_some() {
+            if let Some(saved_layout) = self.pre_zoom_layout.take() {
+                self.ws_mut().layout = saved_layout;
+            }
+            self.zoomed_pane_id = None;
+            self.pre_zoom_layout = None;
+        } else {
+            let focused = self.ws().focused_pane_id;
+            if self.ws().layout.pane_count() > 1 {
+                self.pre_zoom_layout = Some(self.ws().layout.clone_layout());
+                self.ws_mut().layout = LayoutNode::Leaf { pane_id: focused };
+                self.zoomed_pane_id = Some(focused);
+            }
+        }
         self.mark_layout_change();
     }
 
@@ -1705,7 +1762,7 @@ fn extract_selected_text(pane: &Pane, sr: u32, sc: u32, er: u32, ec: u32) -> Str
     }
 
     // Remove trailing empty lines
-    while lines.last().map_or(false, |l| l.is_empty()) {
+    while lines.last().is_some_and(|l: &String| l.is_empty()) {
         lines.pop();
     }
 
@@ -1744,7 +1801,7 @@ fn extract_preview_selected_text(preview: &crate::preview::Preview, sr: u32, sc:
     }
 
     // Strip trailing empty lines only.
-    while out.last().map_or(false, |l| l.is_empty()) {
+    while out.last().is_some_and(|l: &String| l.is_empty()) {
         out.pop();
     }
 
