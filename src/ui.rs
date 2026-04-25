@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, DragTarget, FocusTarget};
+use crate::app::{App, DragTarget, FocusTarget, PaneStatus, FEATURES};
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
 const BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
@@ -84,6 +84,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if app.layout_picker.visible {
         render_layout_picker(app, frame, area);
+    }
+
+    if app.feature_toggle.visible {
+        render_feature_toggle(app, frame, area);
     }
 }
 
@@ -363,6 +367,9 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
     let focused_id = app.ws().focused_pane_id;
     let focus_target = app.ws().focus_target;
     let selection = app.selection.clone();
+    let show_status_dot = app.config.features.status_dot;
+    let show_status_bg = app.config.features.status_bg_color
+        && !app.config.status.respect_terminal_bg;
     for (pane_id, rect) in rects {
         if let Some(pane) = app.ws().panes.get(&pane_id) {
             let is_focused = pane_id == focused_id && focus_target == FocusTarget::Pane;
@@ -370,16 +377,37 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 matches!(s.target, crate::app::SelectionTarget::Pane(id) if id == pane_id)
             });
             let claude_state = app.claude_monitor.state(pane_id);
-            render_single_pane(pane, is_focused, pane_sel, &claude_state, frame, rect);
+            let pane_status = app.pane_status(pane_id);
+            let dismissed = app.pane_state_dismissed(pane_id);
+            let ai_title = app.ai_titles.get(&pane_id).cloned();
+            render_single_pane(
+                pane,
+                is_focused,
+                pane_sel,
+                &claude_state,
+                pane_status,
+                dismissed,
+                show_status_dot,
+                show_status_bg,
+                ai_title.as_deref(),
+                frame,
+                rect,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     pane: &crate::pane::Pane,
     is_focused: bool,
     selection: Option<&crate::app::TextSelection>,
     claude_state: &crate::claude_monitor::ClaudeState,
+    pane_status: PaneStatus,
+    dismissed: bool,
+    show_status_dot: bool,
+    show_status_bg: bool,
+    ai_title: Option<&str>,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -393,13 +421,17 @@ fn render_single_pane(
     };
 
     let is_scrolled = pane.is_scrolled_back();
-    let label = if is_claude { "claude" } else { "shell" };
+    let label = if let Some(title) = ai_title {
+        title.to_string()
+    } else if is_claude {
+        "claude".to_string()
+    } else {
+        "shell".to_string()
+    };
 
-    // Build claude status suffix
     let claude_suffix = if is_claude {
         let mut parts = Vec::new();
         if claude_state.subagent_count > 0 {
-            // Show agent type names if available, else just count
             if !claude_state.subagent_types.is_empty() {
                 parts.push(format!(
                     "\u{1f916} {}",
@@ -421,10 +453,21 @@ fn render_single_pane(
         String::new()
     };
 
-    let pane_title = if is_focused {
-        format!(" \u{25cf} {} [{}]{} ", label, pane.id, claude_suffix)
+    let status_dot = if show_status_dot && !dismissed {
+        match pane_status {
+            PaneStatus::Idle => "",
+            PaneStatus::Running => "\u{1f535} ",
+            PaneStatus::Done => "\u{1f7e2} ",
+            PaneStatus::Waiting => "\u{1f7e1} ",
+        }
     } else {
-        format!("   {} [{}]{} ", label, pane.id, claude_suffix)
+        ""
+    };
+
+    let pane_title = if is_focused {
+        format!(" \u{25cf} {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
+    } else {
+        format!("   {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
     };
 
     let title_style = if is_focused && is_claude {
@@ -480,13 +523,23 @@ fn render_single_pane(
         Line::from("")
     };
 
+    let pane_bg = if show_status_bg && !dismissed {
+        match pane_status {
+            PaneStatus::Done => Color::Rgb(13, 43, 13),
+            PaneStatus::Waiting => Color::Rgb(43, 26, 0),
+            _ => BG,
+        }
+    } else {
+        BG
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(pane_title, title_style))
         .title_bottom(bottom_title)
-        .style(Style::default().bg(BG));
+        .style(Style::default().bg(pane_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -832,10 +885,14 @@ fn render_preview(app: &mut App, frame: &mut Frame, area: Rect) {
 // ─── Status bar (context-aware) ───────────────────────────
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
+    if !app.config.features.status_bar && app.rename_input.is_none() {
+        let empty = Paragraph::new("").style(Style::default().bg(HEADER_BG));
+        frame.render_widget(empty, area);
+        return;
+    }
+
     let focus = app.ws().focus_target;
 
-    // Rename mode overrides focus-specific hints — key input is being
-    // captured by the buffer regardless of which pane/panel is focused.
     let hints = if app.rename_input.is_some() {
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(ACCENT_BLUE)),
@@ -893,6 +950,19 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let status = Paragraph::new(hints).style(Style::default().bg(HEADER_BG));
     frame.render_widget(status, area);
 
+    // Global pane status counts
+    let mut running_count = 0usize;
+    let mut done_count = 0usize;
+    let mut waiting_count = 0usize;
+    for state in app.pane_states.values() {
+        match state.status {
+            PaneStatus::Running => running_count += 1,
+            PaneStatus::Done => done_count += 1,
+            PaneStatus::Waiting => waiting_count += 1,
+            PaneStatus::Idle => {}
+        }
+    }
+
     // Right-side info: Claude state of focused pane
     let focused_id = app.ws().focused_pane_id;
     let claude_state = app.claude_monitor.state(focused_id);
@@ -948,6 +1018,24 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(ACCENT_BLUE),
         ));
     }
+
+    // Pane status counts
+    if running_count > 0 || done_count > 0 || waiting_count > 0 {
+        right_spans.push(Span::styled(
+            format!(
+                " \u{23f5}:{} \u{2713}:{} \u{23f8}:{} ",
+                running_count, done_count, waiting_count
+            ),
+            Style::default().fg(TEXT_DIM),
+        ));
+    }
+
+    // AI title indicator
+    let ai_label = if app.ai_title_enabled { "AI:on" } else { "AI:off" };
+    right_spans.push(Span::styled(
+        format!(" {} ", ai_label),
+        Style::default().fg(if app.ai_title_enabled { ACCENT_GREEN } else { TEXT_DIM }),
+    ));
 
     // Update notice (highest priority — overrides above if present)
     if let Some(new_version) = app.version_info.update_available() {
@@ -1016,6 +1104,74 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
         width += ch_width;
     }
     result
+}
+
+fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
+    let dialog_width = 40u16;
+    let dialog_height = (FEATURES.len() as u16) + 6;
+
+    let x = area.x + area.width.saturating_sub(dialog_width) / 2;
+    let y = area.y + area.height.saturating_sub(dialog_height) / 2;
+    let dialog_rect = Rect::new(
+        x,
+        y,
+        dialog_width.min(area.width),
+        dialog_height.min(area.height),
+    );
+
+    frame.render_widget(Clear, dialog_rect);
+
+    let selected = app.feature_toggle.selected;
+
+    let outer_block = Block::default()
+        .title(" Features ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FOCUS_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    frame.render_widget(outer_block, dialog_rect);
+
+    let inner = Rect::new(
+        dialog_rect.x + 2,
+        dialog_rect.y + 1,
+        dialog_rect.width.saturating_sub(4),
+        dialog_rect.height.saturating_sub(2),
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, &(key, desc)) in FEATURES.iter().enumerate() {
+        let enabled = app.feature_toggle.pending.get_by_key(key);
+        let checkbox = if enabled { "[\u{2705}]" } else { "[  ]" };
+        let is_selected = i == selected;
+
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(FOCUS_BORDER)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+
+        let marker = if is_selected { " > " } else { "   " };
+
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+            Span::styled(format!("{} {}  {}", checkbox, key, desc), style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k: move  Space: toggle  q: apply  Esc: cancel",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
 }
 
 fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
