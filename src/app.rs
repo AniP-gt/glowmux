@@ -1765,11 +1765,17 @@ impl App {
                 self.config.features = self.feature_toggle.pending.clone();
                 self.ai_title_enabled = self.config.features.ai_title;
                 self.feature_toggle.visible = false;
+                if let Err(e) = self.config.save() {
+                    eprintln!("glowmux: config save error: {}", e);
+                }
             }
             KeyCode::Enter => {
                 self.config.features = self.feature_toggle.pending.clone();
                 self.ai_title_enabled = self.config.features.ai_title;
                 self.feature_toggle.visible = false;
+                if let Err(e) = self.config.save() {
+                    eprintln!("glowmux: config save error: {}", e);
+                }
             }
             KeyCode::Esc => {
                 self.feature_toggle.visible = false;
