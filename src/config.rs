@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ConfigFile {
     pub features: FeaturesConfig,
@@ -17,7 +17,7 @@ pub struct ConfigFile {
     pub ai_title_engine: AiTitleEngineConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FeaturesConfig {
     pub ai_title: bool,
@@ -71,14 +71,14 @@ impl FeaturesConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TerminalConfig {
     pub scrollback: usize,
     pub unicode_width: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LayoutConfig {
     pub auto_responsive: bool,
@@ -88,7 +88,7 @@ pub struct LayoutConfig {
     pub preview_width: u16,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StartupConfig {
     pub enabled: bool,
@@ -97,7 +97,7 @@ pub struct StartupConfig {
     pub default_agent: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StartupPane {
     pub command: String,
@@ -105,14 +105,14 @@ pub struct StartupPane {
     pub branch: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PaneConfig {
     pub border_style: String,
     pub show_pane_numbers: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiConfig {
     pub provider: String,
@@ -123,7 +123,7 @@ pub struct AiConfig {
     pub claude_headless: AiClaudeHeadlessConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiTitleConfig {
     pub enabled: bool,
@@ -131,7 +131,7 @@ pub struct AiTitleConfig {
     pub prompt: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiWorktreeNameConfig {
     pub enabled: bool,
@@ -139,26 +139,30 @@ pub struct AiWorktreeNameConfig {
     pub prompt: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiOllamaConfig {
     pub base_url: String,
     pub model: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiGeminiConfig {
     pub model: String,
+    /// API key is never serialized back to disk to avoid plaintext credential leakage.
+    /// Set via config.toml [ai.gemini] api_key; it will be read on load but never written.
+    #[serde(default, skip_serializing)]
+    pub api_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiClaudeHeadlessConfig {
     pub model: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct StatusConfig {
     pub color_running: String,
@@ -173,7 +177,7 @@ pub struct StatusConfig {
     pub override_bg_waiting: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WorktreeConfig {
     pub base_dir: String,
@@ -186,7 +190,7 @@ pub struct WorktreeConfig {
     pub main_branch: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SessionConfig {
     pub enabled: bool,
@@ -197,7 +201,7 @@ pub struct SessionConfig {
 
 /// Key binding configuration. `prefix` is active (ctrl+b default). Other fields
 /// document intended bindings; only `prefix` is wired to runtime behavior.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     pub prefix: String,
@@ -263,7 +267,7 @@ impl Default for AiTitleConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AiTitleEngineConfig {
     pub backend: String,
@@ -310,6 +314,7 @@ impl Default for AiGeminiConfig {
     fn default() -> Self {
         Self {
             model: "gemini-2.0-flash".to_string(),
+            api_key: String::new(),
         }
     }
 }
@@ -400,6 +405,24 @@ impl ConfigFile {
             }
         }
         ConfigFile::default()
+    }
+
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = match Self::config_path() {
+            Some(p) => p,
+            None => return Err("Cannot determine config path".into()),
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        let tmp_path = path.with_extension("toml.tmp");
+        std::fs::write(&tmp_path, &content)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+        Ok(())
     }
 
     fn config_path() -> Option<PathBuf> {
