@@ -93,6 +93,8 @@ pub struct LayoutConfig {
 pub struct StartupConfig {
     pub enabled: bool,
     pub panes: Vec<StartupPane>,
+    /// Default agent command pre-filled in the Ctrl+N pane create dialog (e.g. "claude")
+    pub default_agent: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

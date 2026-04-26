@@ -25,6 +25,8 @@ pub struct Pane {
     pub total_scrollback: Arc<std::sync::atomic::AtomicUsize>,
     pub worktree_path: Option<PathBuf>,
     pub branch_name: Option<String>,
+    /// Agent command to launch after worktree cd completes (e.g. "claude")
+    pub pending_agent: Option<String>,
 }
 
 impl Pane {
@@ -109,6 +111,7 @@ impl Pane {
             total_scrollback: scrollback_counter,
             worktree_path: None,
             branch_name: None,
+            pending_agent: None,
         };
 
         // Inject OSC 7 hook after shell starts

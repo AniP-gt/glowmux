@@ -1092,6 +1092,7 @@ impl App {
                 self.pane_create_dialog = PaneCreateDialog {
                     visible: true,
                     worktree_enabled: self.config.worktree.auto_create,
+                    agent: self.config.startup.default_agent.clone(),
                     focused_field: PaneCreateField::BranchName,
                     ..Default::default()
                 };
@@ -1769,8 +1770,9 @@ impl App {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
+                            let agent = self.pane_create_dialog.agent.clone();
                             self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(branch, worktree)?;
+                            self.create_pane_from_dialog(branch, worktree, agent)?;
                             self.dirty = true;
                         }
                     }
@@ -1778,23 +1780,39 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
-                    self.pane_create_dialog.branch_name.pop();
-                    self.dirty = true;
+                match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => {
+                        self.pane_create_dialog.branch_name.pop();
+                        self.dirty = true;
+                    }
+                    PaneCreateField::AgentField => {
+                        self.pane_create_dialog.agent.pop();
+                        self.dirty = true;
+                    }
+                    _ => {}
                 }
             }
             KeyCode::Char(c) => {
-                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
-                        self.pane_create_dialog.branch_name.push(c);
+                match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
+                            self.pane_create_dialog.branch_name.push(c);
+                            self.dirty = true;
+                        }
+                    }
+                    PaneCreateField::AgentField => {
+                        // Allow printable ASCII for agent command (except newline/null)
+                        if c.is_ascii_graphic() || c == ' ' {
+                            self.pane_create_dialog.agent.push(c);
+                            self.dirty = true;
+                        }
+                    }
+                    PaneCreateField::WorktreeToggle if c == ' ' => {
+                        self.pane_create_dialog.worktree_enabled =
+                            !self.pane_create_dialog.worktree_enabled;
                         self.dirty = true;
                     }
-                } else if c == ' '
-                    && self.pane_create_dialog.focused_field == PaneCreateField::WorktreeToggle
-                {
-                    self.pane_create_dialog.worktree_enabled =
-                        !self.pane_create_dialog.worktree_enabled;
-                    self.dirty = true;
+                    _ => {}
                 }
             }
             _ => {}
@@ -1946,7 +1964,7 @@ impl App {
         }
     }
 
-    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool) -> Result<()> {
+    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool, agent: String) -> Result<()> {
         let (cols, rows) = self.last_term_size;
         let pane_id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
@@ -1971,7 +1989,8 @@ impl App {
         self.ws_mut().focused_pane_id = pane_id;
         self.mark_layout_change();
 
-        if worktree_enabled && !branch_name.is_empty() {
+        let has_branch = !branch_name.is_empty();
+        if worktree_enabled && has_branch {
             if let Some(handle) = &self.tokio_handle {
                 let tx = self.event_tx.clone();
                 let repo_root = cwd;
@@ -1995,13 +2014,31 @@ impl App {
                     }
                 });
             }
-        } else if !worktree_enabled && !branch_name.is_empty() {
+        } else if !worktree_enabled && has_branch {
             // Non-worktree branch: run `git checkout -b <branch>` in the new pane's shell.
             // Shell-quote the branch name to handle special characters safely.
             let quoted = format!("'{}'", branch_name.replace('\'', "'\\''"));
             let cmd = format!("git checkout -b {}\n", quoted);
             if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
                 let _ = pane.write_input(cmd.as_bytes());
+            }
+        }
+
+        // If an agent command is set, launch it in the new pane after any branch/worktree setup.
+        // For worktree panes the agent will be launched after the WorktreeCreated cd completes,
+        // so we store it on the pane and send it in the WorktreeCreated handler.
+        // For non-worktree panes we send it immediately (shell buffers the input).
+        if !agent.is_empty() {
+            if worktree_enabled && has_branch {
+                // Store for deferred launch after WorktreeCreated cd
+                if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+                    pane.pending_agent = Some(agent);
+                }
+            } else {
+                let cmd = format!("{}\n", agent);
+                if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+                    let _ = pane.write_input(cmd.as_bytes());
+                }
             }
         }
 
@@ -2922,6 +2959,11 @@ impl App {
                             let quoted = format!("'{}'", path_str.replace('\'', "'\\''"));
                             let cd_cmd = format!("cd {}\n", quoted);
                             let _ = pane.write_input(cd_cmd.as_bytes());
+                            // Launch pending agent command after cd
+                            if let Some(agent_cmd) = pane.pending_agent.take() {
+                                let cmd = format!("{}\n", agent_cmd);
+                                let _ = pane.write_input(cmd.as_bytes());
+                            }
                             break;
                         }
                     }
