@@ -202,6 +202,42 @@ pub struct WorktreeCleanupDialog {
     pub focused: CloseConfirmFocus,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CopyModeAction {
+    Continue,
+    Quit,
+    Yank,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CopyModeState {
+    pub pane_id: usize,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub selection_start: Option<(u16, u16)>,
+    pub line_wise: bool,
+    pub screen_rows: u16,
+    pub screen_cols: u16,
+    pub first_g: bool,
+    pub scrollback_offset: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PaneListOverlay {
+    pub visible: bool,
+    pub selected: usize,
+    pub pane_ids: Vec<usize>,
+}
+
+const FILETREE_ACTION_COUNT: usize = 2;
+
+#[derive(Debug, Clone, Default)]
+pub struct FileTreeActionPopup {
+    pub visible: bool,
+    pub file_path: std::path::PathBuf,
+    pub selected: usize,
+}
+
 /// Which border is being dragged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DragTarget {
@@ -211,7 +247,6 @@ pub enum DragTarget {
     Scrollbar(usize, Rect), // pane_id, inner area
 }
 
-// ─── Layout Tree ──────────────────────────────────────────
 
 /// Binary tree node for pane layout.
 pub enum LayoutNode {
@@ -385,7 +420,6 @@ fn split_rect(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect)
     }
 }
 
-// ─── Text Selection ───────────────────────────────────────
 
 /// What the current text selection is anchored to.
 #[derive(Debug, Clone, PartialEq)]
@@ -450,7 +484,6 @@ impl TextSelection {
     }
 }
 
-// ─── Workspace (per-tab state) ────────────────────────────
 
 /// A workspace holds all state for one tab.
 #[allow(dead_code)]
@@ -520,7 +553,6 @@ impl Workspace {
     }
 }
 
-// ─── App (global state) ───────────────────────────────────
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -588,6 +620,9 @@ pub struct App {
     pub close_confirm_dialog: CloseConfirmDialog,
     pub worktree_cleanup_dialog: Option<WorktreeCleanupDialog>,
     pub prefix_active: bool,
+    pub copy_mode: Option<CopyModeState>,
+    pub pane_list_overlay: PaneListOverlay,
+    pub filetree_action_popup: FileTreeActionPopup,
 }
 
 impl App {
@@ -664,6 +699,9 @@ impl App {
             close_confirm_dialog: CloseConfirmDialog::default(),
             worktree_cleanup_dialog: None,
             prefix_active: false,
+            copy_mode: None,
+            pane_list_overlay: PaneListOverlay::default(),
+            filetree_action_popup: FileTreeActionPopup::default(),
         };
 
         // Session restore takes priority over startup panes. Only apply startup
@@ -813,7 +851,6 @@ impl App {
         &mut self.workspaces[self.active_tab]
     }
 
-    // ─── Key handling ─────────────────────────────────────
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         // Rename mode — swallow all input until Enter/Esc.
@@ -849,6 +886,21 @@ impl App {
             return self.handle_worktree_cleanup_key(key);
         }
 
+        // Copy mode modal
+        if self.copy_mode.is_some() {
+            return self.handle_copy_mode_key(key);
+        }
+
+        // Pane list overlay modal
+        if self.pane_list_overlay.visible {
+            return self.handle_pane_list_key(key);
+        }
+
+        // File tree action popup modal
+        if self.filetree_action_popup.visible {
+            return self.handle_filetree_action_popup_key(key);
+        }
+
         // Prefix key handling
         let prefix_key = parse_prefix_key(&self.config.keybindings.prefix);
         if let Some((prefix_mods, prefix_code)) = prefix_key {
@@ -869,6 +921,12 @@ impl App {
                 } else if key.code == KeyCode::Char(' ') {
                     // Prefix + Space — cycle layout mode
                     self.cycle_layout_mode();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('[') {
+                    self.enter_copy_mode();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('w') {
+                    self.open_pane_list_overlay();
                     return Ok(true);
                 }
             }
@@ -1203,10 +1261,31 @@ impl App {
             KeyCode::Enter => {
                 let path = self.ws_mut().file_tree.toggle_or_select();
                 if let Some(path) = path {
-                    self.clear_selection_if_preview();
-                    let mut picker = self.image_picker.take();
-                    self.ws_mut().preview.load(&path, picker.as_mut());
-                    self.image_picker = picker;
+                    match self.config.filetree.enter_action.as_str() {
+                        "neovim" | "editor" => {
+                            self.open_in_editor(&path);
+                        }
+                        "choose" => {
+                            self.filetree_action_popup = FileTreeActionPopup {
+                                visible: true,
+                                file_path: path,
+                                selected: 0,
+                            };
+                            self.dirty = true;
+                        }
+                        other => {
+                            if other != "preview" {
+                                self.status_flash = Some((
+                                    format!("不明なenter_action '{}'; プレビューにフォールバック", other),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                            self.clear_selection_if_preview();
+                            let mut picker = self.image_picker.take();
+                            self.ws_mut().preview.load(&path, picker.as_mut());
+                            self.image_picker = picker;
+                        }
+                    }
                 }
                 Ok(true)
             }
@@ -1289,7 +1368,6 @@ impl App {
         }
     }
 
-    // ─── Tab management ───────────────────────────────────
 
     fn new_tab(&mut self) -> Result<()> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1319,7 +1397,6 @@ impl App {
         }
     }
 
-    // ─── Pane management ──────────────────────────────────
 
     fn toggle_file_tree(&mut self) {
         let ws = self.ws_mut();
@@ -2415,7 +2492,6 @@ impl App {
         }
     }
 
-    // ─── Mouse handling ───────────────────────────────────
 
     fn is_on_file_tree_border(&self, col: u16) -> bool {
         if let Some(rect) = self.ws().last_file_tree_rect {
@@ -2439,6 +2515,371 @@ impl App {
         } else {
             false
         }
+    }
+
+
+    fn enter_copy_mode(&mut self) {
+        let pane_id = self.ws().focused_pane_id;
+        let rect = self.ws().last_pane_rects.iter()
+            .find(|&&(id, _)| id == pane_id)
+            .map(|&(_, r)| r);
+
+        enum SizeSource { Rect, Parser, Default }
+
+        let (screen_rows, screen_cols, source) = if let Some(rect) = rect {
+            (rect.height.saturating_sub(2), rect.width.saturating_sub(2), SizeSource::Rect)
+        } else if let Some(pane) = self.ws().panes.get(&pane_id) {
+            let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+            let rows = parser.screen().size().0;
+            let cols = parser.screen().size().1;
+            (rows, cols, SizeSource::Parser)
+        } else {
+            (24u16, 80u16, SizeSource::Default)
+        };
+
+        match source {
+            SizeSource::Parser => {
+                self.status_flash = Some((
+                    "コピーモード: レイアウト未確定のためパーサーサイズを使用".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            SizeSource::Default => {
+                self.status_flash = Some((
+                    "コピーモード: デフォルトサイズ(24x80)を使用".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            SizeSource::Rect => {}
+        }
+
+        self.copy_mode = Some(CopyModeState {
+            pane_id,
+            cursor_row: screen_rows.saturating_sub(1),
+            cursor_col: 0,
+            selection_start: None,
+            line_wise: false,
+            screen_rows,
+            screen_cols,
+            first_g: false,
+            scrollback_offset: 0,
+        });
+        self.dirty = true;
+    }
+
+    fn handle_copy_mode_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.copy_mode.is_none() {
+            return Ok(false);
+        }
+
+        let pane_id = self.copy_mode.as_ref().unwrap().pane_id;
+        let max_scrollback = self.ws().panes.get(&pane_id)
+            .map(|p| p.total_scrollback.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let action = Self::move_copy_cursor(self.copy_mode.as_mut().unwrap(), key, max_scrollback);
+
+        match action {
+            CopyModeAction::Quit => {
+                self.copy_mode = None;
+            }
+            CopyModeAction::Yank => {
+                self.yank_selection();
+                self.copy_mode = None;
+            }
+            CopyModeAction::Continue => {}
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+    fn move_copy_cursor(cm: &mut CopyModeState, key: KeyEvent, max_scrollback: usize) -> CopyModeAction {
+        if cm.screen_rows == 0 {
+            return CopyModeAction::Continue;
+        }
+
+        let is_g = matches!(key.code, KeyCode::Char('g')) && key.modifiers == KeyModifiers::NONE;
+        if !is_g {
+            cm.first_g = false;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return CopyModeAction::Quit,
+            KeyCode::Char('h') | KeyCode::Left => {
+                cm.cursor_col = cm.cursor_col.saturating_sub(1);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                cm.cursor_col = (cm.cursor_col + 1).min(cm.screen_cols.saturating_sub(1));
+            }
+            KeyCode::Char('j') | KeyCode::Down if key.modifiers == KeyModifiers::NONE => {
+                if cm.cursor_row >= cm.screen_rows.saturating_sub(1) && cm.scrollback_offset > 0 {
+                    cm.scrollback_offset -= 1;
+                } else {
+                    cm.cursor_row = (cm.cursor_row + 1).min(cm.screen_rows.saturating_sub(1));
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up if key.modifiers == KeyModifiers::NONE => {
+                if cm.cursor_row == 0 && cm.scrollback_offset < max_scrollback {
+                    cm.scrollback_offset += 1;
+                } else {
+                    cm.cursor_row = cm.cursor_row.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('0') => cm.cursor_col = 0,
+            KeyCode::Char('$') => cm.cursor_col = cm.screen_cols.saturating_sub(1),
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => {
+                if cm.first_g {
+                    cm.cursor_row = 0;
+                    cm.first_g = false;
+                } else {
+                    cm.first_g = true;
+                }
+            }
+            KeyCode::Char('G') => {
+                cm.cursor_row = cm.screen_rows.saturating_sub(1);
+            }
+            KeyCode::Char('v') if key.modifiers == KeyModifiers::NONE => {
+                if cm.selection_start.is_some() && !cm.line_wise {
+                    cm.selection_start = None;
+                } else {
+                    cm.selection_start = Some((cm.cursor_row, cm.cursor_col));
+                    cm.line_wise = false;
+                }
+            }
+            KeyCode::Char('V') => {
+                if cm.selection_start.is_some() && cm.line_wise {
+                    cm.selection_start = None;
+                    cm.line_wise = false;
+                } else {
+                    cm.selection_start = Some((cm.cursor_row, 0));
+                    cm.line_wise = true;
+                }
+            }
+            KeyCode::Char('y') | KeyCode::Enter => return CopyModeAction::Yank,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let half = cm.screen_rows / 2;
+                if cm.cursor_row < half && cm.scrollback_offset < max_scrollback {
+                    let remaining = half - cm.cursor_row;
+                    cm.scrollback_offset = (cm.scrollback_offset + remaining as usize).min(max_scrollback);
+                    cm.cursor_row = 0;
+                } else {
+                    cm.cursor_row = cm.cursor_row.saturating_sub(half);
+                }
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let half = cm.screen_rows / 2;
+                let bottom = cm.screen_rows.saturating_sub(1);
+                if cm.cursor_row + half > bottom && cm.scrollback_offset > 0 {
+                    let overflow = (cm.cursor_row + half) - bottom;
+                    cm.scrollback_offset = cm.scrollback_offset.saturating_sub(overflow as usize);
+                    cm.cursor_row = bottom;
+                } else {
+                    cm.cursor_row = (cm.cursor_row + half).min(bottom);
+                }
+            }
+            _ => {}
+        }
+        CopyModeAction::Continue
+    }
+
+    fn yank_selection(&mut self) {
+        let cm = match self.copy_mode.as_ref() {
+            Some(cm) => cm.clone(),
+            None => return,
+        };
+
+        let pane_id = cm.pane_id;
+        let parser_arc = match self.ws().panes.get(&pane_id) {
+            Some(p) => std::sync::Arc::clone(&p.parser),
+            None => return,
+        };
+        let text = {
+            let mut parser = match parser_arc.lock() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    self.status_flash = Some((
+                        "警告: ターミナル状態が破損している可能性があります".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                    return;
+                }
+            };
+
+            let original_scrollback = parser.screen().scrollback();
+            parser.screen_mut().set_scrollback(cm.scrollback_offset);
+            let screen = parser.screen();
+
+            let (start_row, start_col, end_row, end_col) = if let Some((sr, sc)) = cm.selection_start {
+                let min_r = sr.min(cm.cursor_row);
+                let max_r = sr.max(cm.cursor_row);
+                if cm.line_wise {
+                    (min_r, 0u16, max_r, cm.screen_cols)
+                } else {
+                    let (sc_norm, ec_norm) = if sr <= cm.cursor_row {
+                        (sc, cm.cursor_col)
+                    } else {
+                        (cm.cursor_col, sc)
+                    };
+                    let end_col = ec_norm.saturating_add(1).min(cm.screen_cols);
+                    (min_r, sc_norm, max_r, end_col)
+                }
+            } else {
+                (cm.cursor_row, 0, cm.cursor_row, cm.screen_cols)
+            };
+
+            let mut lines = Vec::new();
+            for row in start_row..=end_row {
+                let col_start = if !cm.line_wise && row == start_row { start_col } else { 0 };
+                let col_end = if !cm.line_wise && row == end_row { end_col } else { cm.screen_cols };
+                let mut line = String::new();
+                for col in col_start..col_end {
+                    if let Some(cell) = screen.cell(row, col) {
+                        let contents = cell.contents();
+                        if contents.is_empty() {
+                            line.push(' ');
+                        } else {
+                            line.push_str(contents);
+                        }
+                    }
+                }
+                lines.push(line.trim_end().to_string());
+            }
+
+            parser.screen_mut().set_scrollback(original_scrollback);
+
+            lines.join("\n")
+        };
+
+        if !text.is_empty() {
+            self.copy_to_clipboard(&text);
+            let line_count = text.lines().count();
+            self.status_flash = Some((
+                format!("コピーしました（{}行）", line_count),
+                std::time::Instant::now(),
+            ));
+        }
+    }
+
+
+    fn open_pane_list_overlay(&mut self) {
+        let pane_ids = self.ws().layout.collect_pane_ids();
+        let focused = self.ws().focused_pane_id;
+        let selected = pane_ids.iter().position(|&id| id == focused).unwrap_or(0);
+        self.pane_list_overlay = PaneListOverlay {
+            visible: true,
+            selected,
+            pane_ids,
+        };
+        self.dirty = true;
+    }
+
+    fn handle_pane_list_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let len = self.pane_list_overlay.pane_ids.len();
+        if len == 0 {
+            self.pane_list_overlay.visible = false;
+            return Ok(true);
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.pane_list_overlay.selected = (self.pane_list_overlay.selected + 1) % len;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.pane_list_overlay.selected = (self.pane_list_overlay.selected + len - 1) % len;
+            }
+            KeyCode::Char(c @ '0'..='9') => {
+                let digit = (c as usize) - ('0' as usize);
+                self.pane_list_overlay.selected = digit.min(len.saturating_sub(1));
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(&selected_id) = self.pane_list_overlay.pane_ids.get(self.pane_list_overlay.selected) {
+                    self.ws_mut().focused_pane_id = selected_id;
+                }
+                self.pane_list_overlay.visible = false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pane_list_overlay.visible = false;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+
+    fn sanitize_shell_arg(s: &str) -> Option<String> {
+        if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return None;
+        }
+        Some(s.replace('\'', "'\\''"))
+    }
+
+    fn open_in_editor(&mut self, path: &std::path::Path) {
+        let editor = self.config.filetree.editor.trim().to_string();
+        if editor.is_empty() {
+            self.status_flash = Some((
+                "エディタが設定されていません".to_string(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        let escaped_editor = match Self::sanitize_shell_arg(&editor) {
+            Some(e) => e,
+            None => {
+                self.status_flash = Some((
+                    "エディタ名に不正な文字が含まれています".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let path_str = path.to_string_lossy();
+        let escaped_path = match Self::sanitize_shell_arg(&path_str) {
+            Some(p) => p,
+            None => {
+                self.status_flash = Some((
+                    "ファイルパスに不正な文字が含まれています".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let cmd = format!("'{}' '{}'\n", escaped_editor, escaped_path);
+
+        let pane_id = self.ws().focused_pane_id;
+        if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+            let _ = pane.write_input(cmd.as_bytes());
+        }
+        self.ws_mut().focus_target = FocusTarget::Pane;
+        self.dirty = true;
+    }
+
+    fn handle_filetree_action_popup_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + 1) % FILETREE_ACTION_COUNT;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + FILETREE_ACTION_COUNT - 1) % FILETREE_ACTION_COUNT;
+            }
+            KeyCode::Enter => {
+                let path = self.filetree_action_popup.file_path.clone();
+                if self.filetree_action_popup.selected == 0 {
+                    self.clear_selection_if_preview();
+                    let mut picker = self.image_picker.take();
+                    self.ws_mut().preview.load(&path, picker.as_mut());
+                    self.image_picker = picker;
+                } else {
+                    self.open_in_editor(&path);
+                }
+                self.filetree_action_popup.visible = false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.filetree_action_popup.visible = false;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
@@ -2887,7 +3328,6 @@ impl App {
         }
     }
 
-    // ─── PTY forwarding ───────────────────────────────────
 
     /// Forward pasted text to PTY, wrapping in bracketed paste only if
     /// the PTY application has enabled the mode (e.g. Claude Code, modern
