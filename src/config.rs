@@ -15,6 +15,7 @@ pub struct ConfigFile {
     pub session: SessionConfig,
     pub keybindings: KeybindingsConfig,
     pub ai_title_engine: AiTitleEngineConfig,
+    pub filetree: FileTreeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -212,6 +213,23 @@ pub struct KeybindingsConfig {
     pub pane_right: String,
     pub pane_up: String,
     pub pane_down: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FileTreeConfig {
+    pub enter_action: String,
+    // Editor command name only (no arguments, no shell metacharacters)
+    pub editor: String,
+}
+
+impl Default for FileTreeConfig {
+    fn default() -> Self {
+        Self {
+            enter_action: "preview".to_string(),
+            editor: "nvim".to_string(),
+        }
+    }
 }
 
 impl Default for TerminalConfig {
