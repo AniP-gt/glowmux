@@ -1400,31 +1400,6 @@ impl App {
         // in it immediately after splitting.
         ws.focused_pane_id = new_id;
 
-        // Auto-responsive: apply layout based on terminal width when in Auto mode
-        if self.ws().layout_mode == LayoutMode::Auto && self.config.layout.auto_responsive {
-            let cols = self.last_term_size.0;
-            let breakpoint_stack = self.config.layout.breakpoint_stack;
-            let breakpoint_split2 = self.config.layout.breakpoint_split2;
-            let pane_count = self.ws().layout.pane_count();
-
-            if pane_count >= 2 {
-                let responsive_mode = if cols < breakpoint_stack {
-                    LayoutMode::Stack
-                } else if cols < breakpoint_split2 {
-                    LayoutMode::TwoSplit
-                } else if pane_count >= 4 {
-                    LayoutMode::Grid
-                } else {
-                    LayoutMode::TwoSplit
-                };
-
-                let pane_ids = self.ws().layout.collect_pane_ids();
-                if let Some(new_layout) = Self::build_layout_node(responsive_mode, &pane_ids) {
-                    self.ws_mut().layout = new_layout;
-                }
-            }
-        }
-
         self.mark_layout_change();
         Ok(())
     }
