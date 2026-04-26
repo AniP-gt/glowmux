@@ -61,14 +61,22 @@ pub async fn generate_title(
 pub fn detect_prompt_return(last_line: &str) -> bool {
     let trimmed = last_line.trim_end();
     // Standard shell prompts
-    trimmed.ends_with("$ ")
+    if trimmed.ends_with("$ ")
         || trimmed.ends_with("> ")
         || trimmed.ends_with("% ")
         || trimmed == "$"
         || trimmed == ">"
         || trimmed == "%"
-        // Claude Code interactive prompts
-        || trimmed.ends_with("? ")
+        // Claude Code interactive prompts (❯ prompt, ? input prompt)
         || trimmed.ends_with("❯ ")
         || trimmed.ends_with("❯")
+        || trimmed.ends_with("? ")
+    {
+        return true;
+    }
+    // Claude Code "bypass permissions on (shift+tab to cycle)" line signals idle state
+    if trimmed.contains("bypass permissions") || trimmed.contains("shift+tab to cycle") {
+        return true;
+    }
+    false
 }

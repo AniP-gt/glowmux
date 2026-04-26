@@ -2857,25 +2857,36 @@ impl App {
                     }
                 }
                 AppEvent::PtyOutput(pane_id) => {
+                    // Scan the bottom few rows of the vt100 screen for a prompt line.
+                    // Claude Code renders its prompt in the middle of the screen, not
+                    // on the last row (which is often empty or a status bar).
                     let last_line: Option<String> = 'outer: {
                         for ws in &self.workspaces {
                             if let Some(pane) = ws.panes.get(&pane_id) {
                                 let Ok(parser) = pane.parser.lock() else { break 'outer None; };
                                 let screen = parser.screen();
                                 let (rows, cols) = screen.size();
-                                let last_row = rows.saturating_sub(1);
-                                let mut line = String::new();
-                                for col in 0..cols {
-                                    if let Some(cell) = screen.cell(last_row, col) {
-                                        let c = cell.contents();
-                                        if c.is_empty() {
-                                            line.push(' ');
-                                        } else {
-                                            line.push_str(c);
+                                // Check bottom 8 rows, return the last non-empty one
+                                let scan_start = rows.saturating_sub(8);
+                                let mut best: Option<String> = None;
+                                for row in scan_start..rows {
+                                    let mut line = String::new();
+                                    for col in 0..cols {
+                                        if let Some(cell) = screen.cell(row, col) {
+                                            let c = cell.contents();
+                                            if c.is_empty() {
+                                                line.push(' ');
+                                            } else {
+                                                line.push_str(c);
+                                            }
                                         }
                                     }
+                                    let trimmed = line.trim_end().to_string();
+                                    if !trimmed.is_empty() {
+                                        best = Some(trimmed);
+                                    }
                                 }
-                                break 'outer Some(line.trim_end().to_string());
+                                break 'outer best;
                             }
                         }
                         None
