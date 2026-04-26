@@ -117,6 +117,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if app.pane_list_overlay.visible {
         render_pane_list_overlay(app, frame, area);
     }
+
+    if app.filetree_action_popup.visible {
+        render_filetree_action_popup(app, frame, area);
+    }
 }
 
 // ─── Tab bar ──────────────────────────────────────────────
@@ -1767,6 +1771,61 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " j/k:移動  Enter:選択  Esc:閉じる",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
+}
+
+fn render_filetree_action_popup(app: &App, frame: &mut Frame, area: Rect) {
+    let popup = &app.filetree_action_popup;
+    let popup_w = 26u16.min(area.width.saturating_sub(4));
+    let popup_h = 8u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" ファイルを開く ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FOCUS_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let options = [
+        "プレビュー",
+        "エディタで開く",
+    ];
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, label) in options.iter().enumerate() {
+        let is_selected = i == popup.selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(FOCUS_BORDER)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+        let marker = if is_selected { " > " } else { "   " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+            Span::styled(format!("[{}]", label), style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter:選択  Esc:閉じる",
         Style::default().fg(TEXT_DIM),
     )));
 

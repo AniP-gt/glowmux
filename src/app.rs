@@ -229,6 +229,15 @@ pub struct PaneListOverlay {
     pub pane_ids: Vec<usize>,
 }
 
+const FILETREE_ACTION_COUNT: usize = 2;
+
+#[derive(Debug, Clone, Default)]
+pub struct FileTreeActionPopup {
+    pub visible: bool,
+    pub file_path: std::path::PathBuf,
+    pub selected: usize,
+}
+
 /// Which border is being dragged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DragTarget {
@@ -613,6 +622,7 @@ pub struct App {
     pub prefix_active: bool,
     pub copy_mode: Option<CopyModeState>,
     pub pane_list_overlay: PaneListOverlay,
+    pub filetree_action_popup: FileTreeActionPopup,
 }
 
 impl App {
@@ -691,6 +701,7 @@ impl App {
             prefix_active: false,
             copy_mode: None,
             pane_list_overlay: PaneListOverlay::default(),
+            filetree_action_popup: FileTreeActionPopup::default(),
         };
 
         // Session restore takes priority over startup panes. Only apply startup
@@ -883,6 +894,11 @@ impl App {
         // Pane list overlay modal
         if self.pane_list_overlay.visible {
             return self.handle_pane_list_key(key);
+        }
+
+        // File tree action popup modal
+        if self.filetree_action_popup.visible {
+            return self.handle_filetree_action_popup_key(key);
         }
 
         // Prefix key handling
@@ -1245,10 +1261,31 @@ impl App {
             KeyCode::Enter => {
                 let path = self.ws_mut().file_tree.toggle_or_select();
                 if let Some(path) = path {
-                    self.clear_selection_if_preview();
-                    let mut picker = self.image_picker.take();
-                    self.ws_mut().preview.load(&path, picker.as_mut());
-                    self.image_picker = picker;
+                    match self.config.filetree.enter_action.as_str() {
+                        "neovim" | "editor" => {
+                            self.open_in_editor(&path);
+                        }
+                        "choose" => {
+                            self.filetree_action_popup = FileTreeActionPopup {
+                                visible: true,
+                                file_path: path,
+                                selected: 0,
+                            };
+                            self.dirty = true;
+                        }
+                        other => {
+                            if other != "preview" {
+                                self.status_flash = Some((
+                                    format!("不明なenter_action '{}'; プレビューにフォールバック", other),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                            self.clear_selection_if_preview();
+                            let mut picker = self.image_picker.take();
+                            self.ws_mut().preview.load(&path, picker.as_mut());
+                            self.image_picker = picker;
+                        }
+                    }
                 }
                 Ok(true)
             }
@@ -2774,6 +2811,75 @@ impl App {
             return None;
         }
         Some(s.replace('\'', "'\\''"))
+    }
+
+    fn open_in_editor(&mut self, path: &std::path::Path) {
+        let editor = self.config.filetree.editor.trim().to_string();
+        if editor.is_empty() {
+            self.status_flash = Some((
+                "エディタが設定されていません".to_string(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        let escaped_editor = match Self::sanitize_shell_arg(&editor) {
+            Some(e) => e,
+            None => {
+                self.status_flash = Some((
+                    "エディタ名に不正な文字が含まれています".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let path_str = path.to_string_lossy();
+        let escaped_path = match Self::sanitize_shell_arg(&path_str) {
+            Some(p) => p,
+            None => {
+                self.status_flash = Some((
+                    "ファイルパスに不正な文字が含まれています".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
+        };
+        let cmd = format!("'{}' '{}'\n", escaped_editor, escaped_path);
+
+        let pane_id = self.ws().focused_pane_id;
+        if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+            let _ = pane.write_input(cmd.as_bytes());
+        }
+        self.ws_mut().focus_target = FocusTarget::Pane;
+        self.dirty = true;
+    }
+
+    fn handle_filetree_action_popup_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + 1) % FILETREE_ACTION_COUNT;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + FILETREE_ACTION_COUNT - 1) % FILETREE_ACTION_COUNT;
+            }
+            KeyCode::Enter => {
+                let path = self.filetree_action_popup.file_path.clone();
+                if self.filetree_action_popup.selected == 0 {
+                    self.clear_selection_if_preview();
+                    let mut picker = self.image_picker.take();
+                    self.ws_mut().preview.load(&path, picker.as_mut());
+                    self.image_picker = picker;
+                } else {
+                    self.open_in_editor(&path);
+                }
+                self.filetree_action_popup.visible = false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.filetree_action_popup.visible = false;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
     }
 
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
