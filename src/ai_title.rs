@@ -41,7 +41,7 @@ pub async fn generate_title(
 
     let result = match backend {
         AiTitleBackend::ClaudeHeadless => {
-            ai_invoke::invoke_claude_headless(&prompt, config.timeout_sec).await
+            ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
         }
         AiTitleBackend::Ollama => {
             ai_invoke::invoke_ollama(ollama_url, ollama_model, &prompt, config.timeout_sec).await
@@ -60,10 +60,15 @@ pub async fn generate_title(
 
 pub fn detect_prompt_return(last_line: &str) -> bool {
     let trimmed = last_line.trim_end();
+    // Standard shell prompts
     trimmed.ends_with("$ ")
         || trimmed.ends_with("> ")
         || trimmed.ends_with("% ")
         || trimmed == "$"
         || trimmed == ">"
         || trimmed == "%"
+        // Claude Code interactive prompts
+        || trimmed.ends_with("? ")
+        || trimmed.ends_with("❯ ")
+        || trimmed.ends_with("❯")
 }
