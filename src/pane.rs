@@ -293,16 +293,69 @@ fn pty_reader_thread(
                     }
                 }
 
+                // Extract printable lines from raw PTY bytes (strip ANSI, split on \n)
+                let lines = extract_printable_lines(data);
+
                 let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
                 parser.process(data);
                 drop(parser);
-                let _ = event_tx.send(AppEvent::PtyOutput(pane_id));
+                let _ = event_tx.send(AppEvent::PtyOutput { pane_id, lines });
             }
             Err(_) => {
                 break;
             }
         }
     }
+}
+
+/// Strip ANSI escape sequences and extract non-empty printable lines from raw PTY bytes.
+/// Used to populate the pane output ring for AI title generation.
+fn extract_printable_lines(data: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(data);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequences: ESC [ ... final, ESC ] ... BEL/ST, ESC char
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // CSI: consume until a byte in 0x40–0x7E
+                    for ch in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&ch) { break; }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // OSC: consume until BEL or ESC backslash
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' { break; }
+                        if ch == '\x1b' { chars.next(); break; } // ESC \
+                    }
+                }
+                _ => { chars.next(); } // ESC + single char
+            }
+        } else if c == '\r' {
+            // ignore CR
+        } else if c == '\n' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                lines.push(trimmed);
+            }
+            current.clear();
+        } else if c.is_control() {
+            // skip other control chars
+        } else {
+            current.push(c);
+        }
+    }
+    // flush last partial line
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        lines.push(trimmed);
+    }
+    lines
 }
 
 /// Extract path from OSC 7 escape sequence: \x1b]7;file://HOST/PATH(\x07|\x1b\\)

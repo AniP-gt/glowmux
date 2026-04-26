@@ -17,8 +17,8 @@ use crate::preview::Preview;
 /// Events dispatched within the app.
 #[allow(dead_code)]
 pub enum AppEvent {
-    /// PTY output received for a pane.
-    PtyOutput(usize),
+    /// PTY output received for a pane. `lines` contains new printable lines from the PTY.
+    PtyOutput { pane_id: usize, lines: Vec<String> },
     /// PTY process exited for a pane.
     PtyEof(usize),
     /// Shell changed working directory (pane_id, new path).
@@ -2856,80 +2856,22 @@ impl App {
                         }
                     }
                 }
-                AppEvent::PtyOutput(pane_id) => {
-                    // Scan the bottom few rows of the vt100 screen for a prompt line.
-                    // Claude Code renders its prompt in the middle of the screen, not
-                    // on the last row (which is often empty or a status bar).
-                    let last_line: Option<String> = 'outer: {
-                        for ws in &self.workspaces {
-                            if let Some(pane) = ws.panes.get(&pane_id) {
-                                let Ok(parser) = pane.parser.lock() else { break 'outer None; };
-                                let screen = parser.screen();
-                                let (rows, cols) = screen.size();
-                                // Check bottom 8 rows, return the last non-empty one
-                                let scan_start = rows.saturating_sub(8);
-                                let mut best: Option<String> = None;
-                                for row in scan_start..rows {
-                                    let mut line = String::new();
-                                    for col in 0..cols {
-                                        if let Some(cell) = screen.cell(row, col) {
-                                            let c = cell.contents();
-                                            if c.is_empty() {
-                                                line.push(' ');
-                                            } else {
-                                                line.push_str(c);
-                                            }
-                                        }
-                                    }
-                                    let trimmed = line.trim_end().to_string();
-                                    if !trimmed.is_empty() {
-                                        best = Some(trimmed);
-                                    }
-                                }
-                                break 'outer best;
+                AppEvent::PtyOutput { pane_id, lines } => {
+                    // Accumulate meaningful lines into the ring buffer.
+                    // Filter out Claude Code UI noise lines (bypass/status bars).
+                    if self.ai_title_enabled && !lines.is_empty() {
+                        let ring = self.pane_output_rings.entry(pane_id).or_default();
+                        for line in &lines {
+                            if ai_title::is_noise_line(line) {
+                                continue;
                             }
-                        }
-                        None
-                    };
-
-                    if let Some(line) = &last_line {
-                        if !line.is_empty() {
-                            let ring = self.pane_output_rings.entry(pane_id).or_default();
                             ring.push_back(line.clone());
-                            if ring.len() > 50 {
+                            if ring.len() > 100 {
                                 ring.pop_front();
                             }
                         }
                     }
-
-                    if self.ai_title_enabled {
-                        if let Some(line) = &last_line {
-                            if ai_title::detect_prompt_return(line) {
-                                let interval = self.config.ai_title_engine.update_interval_sec;
-                                let should_request = self.last_ai_title_request
-                                    .get(&pane_id)
-                                    .map(|t| t.elapsed().as_secs() >= interval)
-                                    .unwrap_or(true);
-                                if should_request {
-                                    if let Some(ring) = self.pane_output_rings.get(&pane_id) {
-                                        let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
-                                        let tx = self.event_tx.clone();
-                                        if let Some(handle) = &self.tokio_handle {
-                                            self.last_ai_title_request.insert(pane_id, Instant::now());
-                                            let config = self.config.ai_title_engine.clone();
-                                            let ollama_url = self.config.ai.ollama.base_url.clone();
-                                            let ollama_model = self.config.ai.ollama.model.clone();
-                                            handle.spawn(async move {
-                                                if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
-                                                    let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.dirty = true;
                 }
                 AppEvent::HookReceived { pane_id, event } => {
                     let pane_exists = self.workspaces.iter()
@@ -2940,6 +2882,33 @@ impl App {
                             HookEvent::Stop => {
                                 state.status = PaneStatus::Done;
                                 state.dismissed = false;
+                                // Claude Code returned to prompt — good time to generate title
+                                if self.ai_title_enabled {
+                                    let interval = self.config.ai_title_engine.update_interval_sec;
+                                    let should_request = self.last_ai_title_request
+                                        .get(&pane_id)
+                                        .map(|t| t.elapsed().as_secs() >= interval)
+                                        .unwrap_or(true);
+                                    if should_request {
+                                        if let Some(ring) = self.pane_output_rings.get(&pane_id) {
+                                            if !ring.is_empty() {
+                                                let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
+                                                let tx = self.event_tx.clone();
+                                                if let Some(handle) = &self.tokio_handle {
+                                                    self.last_ai_title_request.insert(pane_id, Instant::now());
+                                                    let config = self.config.ai_title_engine.clone();
+                                                    let ollama_url = self.config.ai.ollama.base_url.clone();
+                                                    let ollama_model = self.config.ai.ollama.model.clone();
+                                                    handle.spawn(async move {
+                                                        if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
+                                                            let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             HookEvent::UserPromptSubmit | HookEvent::PreToolUse => {
                                 state.status = PaneStatus::Running;
