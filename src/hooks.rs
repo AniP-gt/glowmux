@@ -135,7 +135,7 @@ async fn handle_connection(mut stream: tokio::net::UnixStream, tx: Sender<AppEve
         None => return,
     };
 
-    if let Some(hook_event) = HookEvent::from_str(&msg.event) {
+    if let Some(hook_event) = HookEvent::from_str(&msg.event.to_lowercase()) {
         let _ = tx.send(AppEvent::HookReceived {
             pane_id,
             event: hook_event,
