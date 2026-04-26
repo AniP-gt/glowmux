@@ -863,16 +863,9 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            self.should_quit = true;
-                            return Ok(true);
-                        }
-                        // Unknown prefix command — fall through to normal dispatch
-                        // so the key is not silently swallowed
-                        _ => {}
-                    }
+                } else if let KeyCode::Char('q') = key.code {
+                    self.should_quit = true;
+                    return Ok(true);
                 }
             }
         }
@@ -3279,7 +3272,7 @@ fn restore_session_workspaces(
     pane_cols: u16,
     tx: &std::sync::mpsc::Sender<AppEvent>,
 ) -> anyhow::Result<()> {
-    if session.workspaces.first().is_none() {
+    if session.workspaces.is_empty() {
         return Err(anyhow::anyhow!("empty session"));
     }
 
