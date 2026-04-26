@@ -151,6 +151,14 @@ fn run_event_loop(
             }
         }
 
+        // Clear status flash after 2 seconds
+        if let Some((_, when)) = &app.status_flash {
+            if when.elapsed().as_secs() >= 2 {
+                app.status_flash = None;
+                app.dirty = true;
+            }
+        }
+
         // Only render when something changed (and no cooldown is active)
         if app.dirty && app.paste_cooldown == 0 && app.resize_cooldown == 0 {
             app.dirty = false;

@@ -77,6 +77,22 @@ pub struct FeatureToggleState {
     pub pending: FeaturesConfig,
 }
 
+pub const SETTINGS_ITEMS: &[(&str, &str)] = &[
+    ("terminal.scrollback", "スクロールバック行数"),
+    ("layout.breakpoint_stack", "レイアウト切替幅(stack)"),
+    ("layout.breakpoint_split2", "レイアウト切替幅(split2)"),
+    ("ai_title_engine.update_interval_sec", "AIタイトル更新間隔(秒)"),
+    ("ai_title_engine.max_chars", "AIタイトル最大文字数"),
+];
+
+#[derive(Debug, Clone)]
+pub struct SettingsPanelState {
+    pub visible: bool,
+    pub selected: usize,
+    pub editing: bool,
+    pub edit_buffer: String,
+}
+
 /// Split direction for layout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SplitDirection {
@@ -562,6 +578,8 @@ pub struct App {
     pub pane_states: HashMap<usize, PaneState>,
     pub ai_title_enabled: bool,
     pub feature_toggle: FeatureToggleState,
+    pub settings_panel: SettingsPanelState,
+    pub status_flash: Option<(String, std::time::Instant)>,
     pub pane_output_rings: HashMap<usize, VecDeque<String>>,
     pub last_ai_title_request: HashMap<usize, Instant>,
     pub ai_titles: HashMap<usize, String>,
@@ -628,6 +646,13 @@ impl App {
                 selected: 0,
                 pending: FeaturesConfig::default(),
             },
+            settings_panel: SettingsPanelState {
+                visible: false,
+                selected: 0,
+                editing: false,
+                edit_buffer: String::new(),
+            },
+            status_flash: None,
             pane_output_rings: HashMap::new(),
             last_ai_title_request: HashMap::new(),
             ai_titles: HashMap::new(),
@@ -796,6 +821,11 @@ impl App {
             return Ok(self.handle_rename_key(key));
         }
 
+        // Settings panel dialog
+        if self.settings_panel.visible {
+            return self.handle_settings_panel_key(key);
+        }
+
         // Feature toggle dialog
         if self.feature_toggle.visible {
             return self.handle_feature_toggle_key(key);
@@ -833,16 +863,9 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            self.should_quit = true;
-                            return Ok(true);
-                        }
-                        // Unknown prefix command — fall through to normal dispatch
-                        // so the key is not silently swallowed
-                        _ => {}
-                    }
+                } else if let KeyCode::Char('q') = key.code {
+                    self.should_quit = true;
+                    return Ok(true);
                 }
             }
         }
@@ -892,6 +915,25 @@ impl App {
                 }
             }
             // No selection — fall through to forward Ctrl+C to PTY
+        }
+
+        // Ctrl+Y — copy focused pane's visible content to clipboard
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
+            let content = {
+                let pane_id = self.ws().focused_pane_id;
+                self.ws().panes.get(&pane_id)
+                    .map(|p| p.parser.lock().unwrap_or_else(|e| e.into_inner()).screen().contents())
+                    .unwrap_or_default()
+            };
+            if content.trim().is_empty() {
+                self.status_flash = Some(("クリップボードにコピーするコンテンツがありません".to_string(), std::time::Instant::now()));
+            } else {
+                self.copy_to_clipboard(&content);
+                let lines = content.lines().count();
+                self.status_flash = Some((format!("コピーしました（{}行）", lines), std::time::Instant::now()));
+            }
+            self.dirty = true;
+            return Ok(true);
         }
 
         // Ctrl+T / Alt+T — new tab (Alt+T groups with Alt-based tab nav)
@@ -955,6 +997,16 @@ impl App {
             self.feature_toggle.visible = true;
             self.feature_toggle.selected = 0;
             self.feature_toggle.pending = self.config.features.clone();
+            self.dirty = true;
+            return Ok(true);
+        }
+
+        // Ctrl+, — settings panel
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(',') {
+            self.settings_panel.visible = true;
+            self.settings_panel.selected = 0;
+            self.settings_panel.editing = false;
+            self.settings_panel.edit_buffer.clear();
             self.dirty = true;
             return Ok(true);
         }
@@ -1706,11 +1758,17 @@ impl App {
                 self.config.features = self.feature_toggle.pending.clone();
                 self.ai_title_enabled = self.config.features.ai_title;
                 self.feature_toggle.visible = false;
+                if let Err(e) = self.config.save() {
+                    eprintln!("glowmux: config save error: {}", e);
+                }
             }
             KeyCode::Enter => {
                 self.config.features = self.feature_toggle.pending.clone();
                 self.ai_title_enabled = self.config.features.ai_title;
                 self.feature_toggle.visible = false;
+                if let Err(e) = self.config.save() {
+                    eprintln!("glowmux: config save error: {}", e);
+                }
             }
             KeyCode::Esc => {
                 self.feature_toggle.visible = false;
@@ -1719,6 +1777,109 @@ impl App {
         }
         self.dirty = true;
         Ok(true)
+    }
+
+    fn handle_settings_panel_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.settings_panel.editing {
+            match key.code {
+                KeyCode::Enter => {
+                    let Some(&(key_name, _)) = SETTINGS_ITEMS.get(self.settings_panel.selected) else {
+                        self.settings_panel.editing = false;
+                        self.settings_panel.edit_buffer.clear();
+                        self.dirty = true;
+                        return Ok(true);
+                    };
+                    let buf = self.settings_panel.edit_buffer.clone();
+                    self.set_setting_value(key_name, &buf);
+                    if let Err(e) = self.config.save() {
+                        eprintln!("glowmux: config save error: {}", e);
+                    }
+                    self.settings_panel.editing = false;
+                    self.settings_panel.edit_buffer.clear();
+                }
+                KeyCode::Esc => {
+                    self.settings_panel.editing = false;
+                    self.settings_panel.edit_buffer.clear();
+                }
+                KeyCode::Backspace => {
+                    self.settings_panel.edit_buffer.pop();
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    if self.settings_panel.edit_buffer.len() < 10 {
+                        self.settings_panel.edit_buffer.push(c);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.settings_panel.selected =
+                        (self.settings_panel.selected + 1) % SETTINGS_ITEMS.len();
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.settings_panel.selected = if self.settings_panel.selected == 0 {
+                        SETTINGS_ITEMS.len() - 1
+                    } else {
+                        self.settings_panel.selected - 1
+                    };
+                }
+                KeyCode::Enter => {
+                    if let Some(&(key_name, _)) = SETTINGS_ITEMS.get(self.settings_panel.selected) {
+                        self.settings_panel.edit_buffer = self.get_setting_value(key_name);
+                        self.settings_panel.editing = true;
+                    }
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.settings_panel.visible = false;
+                }
+                _ => {}
+            }
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+    pub fn get_setting_value(&self, key: &str) -> String {
+        match key {
+            "terminal.scrollback" => self.config.terminal.scrollback.to_string(),
+            "layout.breakpoint_stack" => self.config.layout.breakpoint_stack.to_string(),
+            "layout.breakpoint_split2" => self.config.layout.breakpoint_split2.to_string(),
+            "ai_title_engine.update_interval_sec" => self.config.ai_title_engine.update_interval_sec.to_string(),
+            "ai_title_engine.max_chars" => self.config.ai_title_engine.max_chars.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn set_setting_value(&mut self, key: &str, value: &str) {
+        match key {
+            "terminal.scrollback" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    self.config.terminal.scrollback = v.clamp(100, 1_000_000);
+                }
+            }
+            "layout.breakpoint_stack" => {
+                if let Ok(v) = value.parse::<u16>() {
+                    self.config.layout.breakpoint_stack = v.max(40);
+                }
+            }
+            "layout.breakpoint_split2" => {
+                if let Ok(v) = value.parse::<u16>() {
+                    self.config.layout.breakpoint_split2 = v.max(40);
+                }
+            }
+            "ai_title_engine.update_interval_sec" => {
+                if let Ok(v) = value.parse::<u64>() {
+                    self.config.ai_title_engine.update_interval_sec = v.max(5);
+                }
+            }
+            "ai_title_engine.max_chars" => {
+                if let Ok(v) = value.parse::<usize>() {
+                    self.config.ai_title_engine.max_chars = v.clamp(5, 200);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_pane_create_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -2895,8 +3056,10 @@ impl App {
                                             let config = self.config.ai_title_engine.clone();
                                             let ollama_url = self.config.ai.ollama.base_url.clone();
                                             let ollama_model = self.config.ai.ollama.model.clone();
+                                            let gemini_api_key = self.config.ai.gemini.api_key.clone();
+                                            let gemini_model = self.config.ai.gemini.model.clone();
                                             handle.spawn(async move {
-                                                if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
+                                                if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
                                                     let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                                 }
                                             });
@@ -2934,8 +3097,10 @@ impl App {
                                                     let config = self.config.ai_title_engine.clone();
                                                     let ollama_url = self.config.ai.ollama.base_url.clone();
                                                     let ollama_model = self.config.ai.ollama.model.clone();
+                                                    let gemini_api_key = self.config.ai.gemini.api_key.clone();
+                                                    let gemini_model = self.config.ai.gemini.model.clone();
                                                     handle.spawn(async move {
-                                                        if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
+                                                        if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
                                                             let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                                         }
                                                     });
@@ -3107,7 +3272,7 @@ fn restore_session_workspaces(
     pane_cols: u16,
     tx: &std::sync::mpsc::Sender<AppEvent>,
 ) -> anyhow::Result<()> {
-    if session.workspaces.first().is_none() {
+    if session.workspaces.is_empty() {
         return Err(anyhow::anyhow!("empty session"));
     }
 
