@@ -385,6 +385,8 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
     let show_status_dot = app.config.features.status_dot;
     let show_status_bg = app.config.features.status_bg_color
         && !app.config.status.respect_terminal_bg;
+    let show_pane_numbers = app.config.pane.show_pane_numbers;
+    let border_type = str_to_border_type(&app.config.pane.border_style);
     for (pane_id, rect) in rects {
         if let Some(pane) = app.ws().panes.get(&pane_id) {
             let is_focused = pane_id == focused_id && focus_target == FocusTarget::Pane;
@@ -404,11 +406,23 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 dismissed,
                 show_status_dot,
                 show_status_bg,
+                show_pane_numbers,
+                border_type,
                 ai_title.as_deref(),
                 frame,
                 rect,
             );
         }
+    }
+}
+
+fn str_to_border_type(s: &str) -> BorderType {
+    match s {
+        "plain"  => BorderType::Plain,
+        "double" => BorderType::Double,
+        "thick"  => BorderType::Thick,
+        "none"   => BorderType::Plain, // ratatui has no "none" variant; borders hidden via Borders::NONE
+        _        => BorderType::Rounded,
     }
 }
 
@@ -422,6 +436,8 @@ fn render_single_pane(
     dismissed: bool,
     show_status_dot: bool,
     show_status_bg: bool,
+    show_pane_numbers: bool,
+    border_type: BorderType,
     ai_title: Option<&str>,
     frame: &mut Frame,
     area: Rect,
@@ -484,12 +500,17 @@ fn render_single_pane(
         ""
     };
 
-    let pane_title = if is_focused {
-        format!(" \u{25cf} {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
-    } else if !status_dot.is_empty() {
-        format!(" {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
+    let id_part = if show_pane_numbers {
+        format!(" [{}]", pane.id)
     } else {
-        format!("   {} [{}]{} ", label, pane.id, claude_suffix)
+        String::new()
+    };
+    let pane_title = if is_focused {
+        format!(" \u{25cf} {}{}{}{} ", status_dot, label, id_part, claude_suffix)
+    } else if !status_dot.is_empty() {
+        format!(" {}{}{}{} ", status_dot, label, id_part, claude_suffix)
+    } else {
+        format!("   {}{}{} ", label, id_part, claude_suffix)
     };
 
     let title_style = if is_focused && is_claude {
@@ -557,7 +578,7 @@ fn render_single_pane(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(border_type)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(pane_title, title_style))
         .title_bottom(bottom_title)

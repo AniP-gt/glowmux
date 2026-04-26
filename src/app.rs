@@ -17,8 +17,8 @@ use crate::preview::Preview;
 /// Events dispatched within the app.
 #[allow(dead_code)]
 pub enum AppEvent {
-    /// PTY output received for a pane.
-    PtyOutput(usize),
+    /// PTY output received for a pane. `lines` contains new printable lines from the PTY.
+    PtyOutput { pane_id: usize, lines: Vec<String> },
     /// PTY process exited for a pane.
     PtyEof(usize),
     /// Shell changed working directory (pane_id, new path).
@@ -1092,6 +1092,7 @@ impl App {
                 self.pane_create_dialog = PaneCreateDialog {
                     visible: true,
                     worktree_enabled: self.config.worktree.auto_create,
+                    agent: self.config.startup.default_agent.clone(),
                     focused_field: PaneCreateField::BranchName,
                     ..Default::default()
                 };
@@ -1769,8 +1770,9 @@ impl App {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
+                            let agent = self.pane_create_dialog.agent.clone();
                             self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(branch, worktree)?;
+                            self.create_pane_from_dialog(branch, worktree, agent)?;
                             self.dirty = true;
                         }
                     }
@@ -1778,23 +1780,39 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
-                    self.pane_create_dialog.branch_name.pop();
-                    self.dirty = true;
+                match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => {
+                        self.pane_create_dialog.branch_name.pop();
+                        self.dirty = true;
+                    }
+                    PaneCreateField::AgentField => {
+                        self.pane_create_dialog.agent.pop();
+                        self.dirty = true;
+                    }
+                    _ => {}
                 }
             }
             KeyCode::Char(c) => {
-                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
-                        self.pane_create_dialog.branch_name.push(c);
+                match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
+                            self.pane_create_dialog.branch_name.push(c);
+                            self.dirty = true;
+                        }
+                    }
+                    PaneCreateField::AgentField => {
+                        // Allow printable ASCII for agent command (except newline/null)
+                        if c.is_ascii_graphic() || c == ' ' {
+                            self.pane_create_dialog.agent.push(c);
+                            self.dirty = true;
+                        }
+                    }
+                    PaneCreateField::WorktreeToggle if c == ' ' => {
+                        self.pane_create_dialog.worktree_enabled =
+                            !self.pane_create_dialog.worktree_enabled;
                         self.dirty = true;
                     }
-                } else if c == ' '
-                    && self.pane_create_dialog.focused_field == PaneCreateField::WorktreeToggle
-                {
-                    self.pane_create_dialog.worktree_enabled =
-                        !self.pane_create_dialog.worktree_enabled;
-                    self.dirty = true;
+                    _ => {}
                 }
             }
             _ => {}
@@ -1946,7 +1964,7 @@ impl App {
         }
     }
 
-    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool) -> Result<()> {
+    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool, agent: String) -> Result<()> {
         let (cols, rows) = self.last_term_size;
         let pane_id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
@@ -1971,7 +1989,8 @@ impl App {
         self.ws_mut().focused_pane_id = pane_id;
         self.mark_layout_change();
 
-        if worktree_enabled && !branch_name.is_empty() {
+        let has_branch = !branch_name.is_empty();
+        if worktree_enabled && has_branch {
             if let Some(handle) = &self.tokio_handle {
                 let tx = self.event_tx.clone();
                 let repo_root = cwd;
@@ -1995,13 +2014,31 @@ impl App {
                     }
                 });
             }
-        } else if !worktree_enabled && !branch_name.is_empty() {
+        } else if !worktree_enabled && has_branch {
             // Non-worktree branch: run `git checkout -b <branch>` in the new pane's shell.
             // Shell-quote the branch name to handle special characters safely.
             let quoted = format!("'{}'", branch_name.replace('\'', "'\\''"));
             let cmd = format!("git checkout -b {}\n", quoted);
             if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
                 let _ = pane.write_input(cmd.as_bytes());
+            }
+        }
+
+        // If an agent command is set, launch it in the new pane after any branch/worktree setup.
+        // For worktree panes the agent will be launched after the WorktreeCreated cd completes,
+        // so we store it on the pane and send it in the WorktreeCreated handler.
+        // For non-worktree panes we send it immediately (shell buffers the input).
+        if !agent.is_empty() {
+            if worktree_enabled && has_branch {
+                // Store for deferred launch after WorktreeCreated cd
+                if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+                    pane.pending_agent = Some(agent);
+                }
+            } else {
+                let cmd = format!("{}\n", agent);
+                if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+                    let _ = pane.write_input(cmd.as_bytes());
+                }
             }
         }
 
@@ -2819,51 +2856,38 @@ impl App {
                         }
                     }
                 }
-                AppEvent::PtyOutput(pane_id) => {
-                    let last_line: Option<String> = 'outer: {
-                        for ws in &self.workspaces {
-                            if let Some(pane) = ws.panes.get(&pane_id) {
-                                let Ok(parser) = pane.parser.lock() else { break 'outer None; };
-                                let screen = parser.screen();
-                                let (rows, cols) = screen.size();
-                                let last_row = rows.saturating_sub(1);
-                                let mut line = String::new();
-                                for col in 0..cols {
-                                    if let Some(cell) = screen.cell(last_row, col) {
-                                        let c = cell.contents();
-                                        if c.is_empty() {
-                                            line.push(' ');
-                                        } else {
-                                            line.push_str(c);
-                                        }
-                                    }
-                                }
-                                break 'outer Some(line.trim_end().to_string());
-                            }
-                        }
-                        None
-                    };
-
-                    if let Some(line) = &last_line {
-                        if !line.is_empty() {
+                AppEvent::PtyOutput { pane_id, lines } => {
+                    // Accumulate meaningful lines into the ring buffer.
+                    // Filter out Claude Code UI noise lines (bypass/status bars).
+                    if self.ai_title_enabled && !lines.is_empty() {
+                        let mut shell_prompt_seen = false;
+                        {
                             let ring = self.pane_output_rings.entry(pane_id).or_default();
-                            ring.push_back(line.clone());
-                            if ring.len() > 50 {
-                                ring.pop_front();
+                            for line in &lines {
+                                if ai_title::is_noise_line(line) {
+                                    continue;
+                                }
+                                if ai_title::is_shell_prompt(line) {
+                                    shell_prompt_seen = true;
+                                    continue; // don't add the prompt line itself to the ring
+                                }
+                                ring.push_back(line.clone());
+                                if ring.len() > 100 {
+                                    ring.pop_front();
+                                }
                             }
                         }
-                    }
-
-                    if self.ai_title_enabled {
-                        if let Some(line) = &last_line {
-                            if ai_title::detect_prompt_return(line) {
-                                let interval = self.config.ai_title_engine.update_interval_sec;
-                                let should_request = self.last_ai_title_request
-                                    .get(&pane_id)
-                                    .map(|t| t.elapsed().as_secs() >= interval)
-                                    .unwrap_or(true);
-                                if should_request {
-                                    if let Some(ring) = self.pane_output_rings.get(&pane_id) {
+                        // Fallback trigger: shell prompt detected (for non-Claude panes
+                        // that don't send HookEvent::Stop)
+                        if shell_prompt_seen {
+                            let interval = self.config.ai_title_engine.update_interval_sec;
+                            let should_request = self.last_ai_title_request
+                                .get(&pane_id)
+                                .map(|t| t.elapsed().as_secs() >= interval)
+                                .unwrap_or(true);
+                            if should_request {
+                                if let Some(ring) = self.pane_output_rings.get(&pane_id) {
+                                    if !ring.is_empty() {
                                         let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
                                         let tx = self.event_tx.clone();
                                         if let Some(handle) = &self.tokio_handle {
@@ -2882,6 +2906,7 @@ impl App {
                             }
                         }
                     }
+                    self.dirty = true;
                 }
                 AppEvent::HookReceived { pane_id, event } => {
                     let pane_exists = self.workspaces.iter()
@@ -2892,6 +2917,33 @@ impl App {
                             HookEvent::Stop => {
                                 state.status = PaneStatus::Done;
                                 state.dismissed = false;
+                                // Claude Code returned to prompt — good time to generate title
+                                if self.ai_title_enabled {
+                                    let interval = self.config.ai_title_engine.update_interval_sec;
+                                    let should_request = self.last_ai_title_request
+                                        .get(&pane_id)
+                                        .map(|t| t.elapsed().as_secs() >= interval)
+                                        .unwrap_or(true);
+                                    if should_request {
+                                        if let Some(ring) = self.pane_output_rings.get(&pane_id) {
+                                            if !ring.is_empty() {
+                                                let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
+                                                let tx = self.event_tx.clone();
+                                                if let Some(handle) = &self.tokio_handle {
+                                                    self.last_ai_title_request.insert(pane_id, Instant::now());
+                                                    let config = self.config.ai_title_engine.clone();
+                                                    let ollama_url = self.config.ai.ollama.base_url.clone();
+                                                    let ollama_model = self.config.ai.ollama.model.clone();
+                                                    handle.spawn(async move {
+                                                        if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
+                                                            let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             HookEvent::UserPromptSubmit | HookEvent::PreToolUse => {
                                 state.status = PaneStatus::Running;
@@ -2922,6 +2974,11 @@ impl App {
                             let quoted = format!("'{}'", path_str.replace('\'', "'\\''"));
                             let cd_cmd = format!("cd {}\n", quoted);
                             let _ = pane.write_input(cd_cmd.as_bytes());
+                            // Launch pending agent command after cd
+                            if let Some(agent_cmd) = pane.pending_agent.take() {
+                                let cmd = format!("{}\n", agent_cmd);
+                                let _ = pane.write_input(cmd.as_bytes());
+                            }
                             break;
                         }
                     }

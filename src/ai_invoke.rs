@@ -2,21 +2,30 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 pub async fn invoke_claude_headless(prompt: &str, timeout_secs: u64) -> Option<String> {
+    invoke_claude_headless_with_model(prompt, timeout_secs, "").await
+}
+
+pub async fn invoke_claude_headless_with_model(prompt: &str, timeout_secs: u64, model: &str) -> Option<String> {
+    let model = model.to_string();
     let result = timeout(
         Duration::from_secs(timeout_secs),
-        run_claude_headless(prompt),
+        run_claude_headless(prompt, &model),
     )
     .await;
 
     result.unwrap_or_default()
 }
 
-async fn run_claude_headless(prompt: &str) -> Option<String> {
+async fn run_claude_headless(prompt: &str, model: &str) -> Option<String> {
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut child = tokio::process::Command::new("claude")
-        .arg("--print")
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("--print");
+    if !model.is_empty() {
+        cmd.args(["--model", model]);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

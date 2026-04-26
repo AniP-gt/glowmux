@@ -93,6 +93,8 @@ pub struct LayoutConfig {
 pub struct StartupConfig {
     pub enabled: bool,
     pub panes: Vec<StartupPane>,
+    /// Default agent command pre-filled in the Ctrl+N pane create dialog (e.g. "claude")
+    pub default_agent: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -265,6 +267,9 @@ impl Default for AiTitleConfig {
 #[serde(default)]
 pub struct AiTitleEngineConfig {
     pub backend: String,
+    /// Model override for claude-headless backend (e.g. "claude-haiku-4-5-20251001").
+    /// Empty string uses the claude CLI default.
+    pub model: String,
     pub max_chars: usize,
     pub timeout_sec: u64,
     pub update_interval_sec: u64,
@@ -274,6 +279,7 @@ impl Default for AiTitleEngineConfig {
     fn default() -> Self {
         Self {
             backend: "claude-headless".to_string(),
+            model: "claude-haiku-4-5-20251001".to_string(),
             max_chars: 20,
             timeout_sec: 5,
             update_interval_sec: 30,
