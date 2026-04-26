@@ -65,6 +65,7 @@ impl Pane {
         cmd.cwd(&work_dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("GLOWMUX", "1"); // marker to detect nested glowmux
+        cmd.env("GLOWMUX_PANE_ID", id.to_string()); // pane ID for hook scripts
 
         let child = pair
             .slave

@@ -16,6 +16,14 @@ impl AiTitleBackend {
     }
 }
 
+/// Returns true if a line looks like a shell prompt (end-of-command signal).
+/// Used as fallback trigger for title generation in non-Claude panes.
+pub fn is_shell_prompt(line: &str) -> bool {
+    let t = line.trim_end();
+    t.ends_with("$ ") || t.ends_with("% ") || t == "$" || t == "%"
+        || t.ends_with("❯ ") || t.ends_with("❯")
+}
+
 /// Returns true if a line is UI noise that should not be stored in the ring buffer.
 /// Filters out Claude Code status bars, bypass lines, ANSI artifacts, etc.
 pub fn is_noise_line(line: &str) -> bool {
