@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{
-    App, CloseConfirmDialog, CloseConfirmFocus, DragTarget, FocusTarget,
+    App, CloseConfirmDialog, CloseConfirmFocus, CopyModeState, DragTarget, FocusTarget,
     PaneCreateDialog, PaneCreateField, PaneStatus, WorktreeCleanupDialog, FEATURES,
     SETTINGS_ITEMS,
 };
@@ -396,6 +396,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
         && !app.config.status.respect_terminal_bg;
     let show_pane_numbers = app.config.pane.show_pane_numbers;
     let border_type = str_to_border_type(&app.config.pane.border_style);
+    let copy_mode = app.copy_mode.clone();
     for (pane_id, rect) in rects {
         if let Some(pane) = app.ws().panes.get(&pane_id) {
             let is_focused = pane_id == focused_id && focus_target == FocusTarget::Pane;
@@ -406,6 +407,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
             let pane_status = app.pane_status(pane_id);
             let dismissed = app.pane_state_dismissed(pane_id);
             let ai_title = app.ai_titles.get(&pane_id).cloned();
+            let pane_copy_mode = copy_mode.as_ref().filter(|c| c.pane_id == pane_id);
             render_single_pane(
                 pane,
                 is_focused,
@@ -418,6 +420,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 show_pane_numbers,
                 border_type,
                 ai_title.as_deref(),
+                pane_copy_mode,
                 frame,
                 rect,
             );
@@ -448,11 +451,15 @@ fn render_single_pane(
     show_pane_numbers: bool,
     border_type: BorderType,
     ai_title: Option<&str>,
+    copy_mode: Option<&CopyModeState>,
     frame: &mut Frame,
     area: Rect,
 ) {
     let is_claude = pane.is_claude_running();
-    let border_color = if is_focused && is_claude {
+    let in_copy_mode = copy_mode.is_some();
+    let border_color = if in_copy_mode {
+        Color::Yellow
+    } else if is_focused && is_claude {
         ACCENT_CLAUDE
     } else if is_focused {
         FOCUS_BORDER
@@ -514,15 +521,18 @@ fn render_single_pane(
     } else {
         String::new()
     };
-    let pane_title = if is_focused {
-        format!(" \u{25cf} {}{}{}{} ", status_dot, label, id_part, claude_suffix)
+    let copy_label = if in_copy_mode { "[COPY] " } else { "" };
+    let pane_title = if is_focused || in_copy_mode {
+        format!(" \u{25cf} {}{}{}{}{} ", copy_label, status_dot, label, id_part, claude_suffix)
     } else if !status_dot.is_empty() {
         format!(" {}{}{}{} ", status_dot, label, id_part, claude_suffix)
     } else {
         format!("   {}{}{} ", label, id_part, claude_suffix)
     };
 
-    let title_style = if is_focused && is_claude {
+    let title_style = if in_copy_mode {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if is_focused && is_claude {
         Style::default().fg(ACCENT_CLAUDE).add_modifier(Modifier::BOLD)
     } else if is_focused {
         Style::default().fg(FOCUS_BORDER).add_modifier(Modifier::BOLD)
@@ -602,7 +612,7 @@ fn render_single_pane(
             .alignment(Alignment::Center);
         frame.render_widget(msg, inner);
     } else {
-        render_terminal_content(pane, is_focused, selection, frame, inner);
+        render_terminal_content(pane, is_focused, selection, copy_mode, frame, inner);
     }
 }
 
@@ -610,10 +620,15 @@ fn render_terminal_content(
     pane: &crate::pane::Pane,
     is_focused: bool,
     selection: Option<&crate::app::TextSelection>,
+    copy_mode: Option<&CopyModeState>,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+    let mut parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
+    let original_scrollback = parser.screen().scrollback();
+    if let Some(cm) = copy_mode {
+        parser.screen_mut().set_scrollback(cm.scrollback_offset);
+    }
     let screen = parser.screen();
 
     let rows = area.height as usize;
@@ -649,7 +664,46 @@ fn render_terminal_content(
                     let (sr, sc, er, ec) = s.normalized();
                     (sr != er || sc != ec) && s.contains(row as u32, col as u32)
                 });
-                let final_style = if has_selection {
+
+                let copy_cursor = copy_mode.is_some_and(|cm| {
+                    cm.cursor_row == row as u16 && cm.cursor_col == col as u16
+                });
+                let copy_selected = copy_mode.is_some_and(|cm| {
+                    if let Some((sr, sc)) = cm.selection_start {
+                        let min_row = sr.min(cm.cursor_row);
+                        let max_row = sr.max(cm.cursor_row);
+                        let r = row as u16;
+                        let c = col as u16;
+                        if r < min_row || r > max_row {
+                            return false;
+                        }
+                        if cm.line_wise {
+                            return true;
+                        }
+                        let (start_col, end_col) = if sr <= cm.cursor_row {
+                            (sc, cm.cursor_col)
+                        } else {
+                            (cm.cursor_col, sc)
+                        };
+                        if min_row == max_row {
+                            c >= start_col && c <= end_col
+                        } else if r == min_row {
+                            c >= start_col
+                        } else if r == max_row {
+                            c <= end_col
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                });
+
+                let final_style = if copy_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                } else if copy_selected {
+                    Style::default().fg(style.fg.unwrap_or(Color::Reset)).bg(Color::Rgb(0x26, 0x4f, 0x78))
+                } else if has_selection {
                     Style::default()
                         .fg(Color::Rgb(0x0d, 0x11, 0x17))
                         .bg(Color::Rgb(0x58, 0xa6, 0xff))
@@ -665,15 +719,18 @@ fn render_terminal_content(
         }
     }
 
-    // Show cursor when focused.
-    // For non-Claude panes, respect the PTY's hide_cursor request.
-    // For Claude Code, always show because Claude relies on the terminal cursor.
-    let show_cursor = is_focused && (!screen.hide_cursor() || pane.is_claude_running());
+    // Restore scrollback before reading cursor position so the cursor
+    // reflects the live terminal, not the scrolled-back view.
+    if copy_mode.is_some() {
+        parser.screen_mut().set_scrollback(original_scrollback);
+    }
+
+    // Show cursor when focused (but not during copy mode — the cursor
+    // position is meaningless when the user is browsing scrollback).
+    let screen = parser.screen();
+    let show_cursor = is_focused && copy_mode.is_none() && (!screen.hide_cursor() || pane.is_claude_running());
     if show_cursor {
         let cursor = screen.cursor_position();
-        // For Claude Code, shift cursor 1 column left because Claude draws its own
-        // block character at the cursor position, and the PTY cursor would otherwise
-        // appear one column after with a visible gap.
         let cursor_x = if pane.is_claude_running() {
             area.x + cursor.1.saturating_sub(1)
         } else {
@@ -685,7 +742,7 @@ fn render_terminal_content(
         }
     }
 
-    drop(parser); // release lock before scrollbar_info
+    drop(parser);
 
     // Scrollbar on the right edge
     let (scroll_offset, total_lines) = pane.scrollbar_info();
