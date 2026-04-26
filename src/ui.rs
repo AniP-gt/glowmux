@@ -113,6 +113,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             render_worktree_cleanup_dialog(frame, area, d);
         }
     }
+
+    if app.pane_list_overlay.visible {
+        render_pane_list_overlay(app, frame, area);
+    }
 }
 
 // ─── Tab bar ──────────────────────────────────────────────
@@ -1671,6 +1675,98 @@ fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " 1-6: select  j/k: move  Enter: apply  Esc: close",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
+}
+
+fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
+    let overlay = &app.pane_list_overlay;
+    let count = overlay.pane_ids.len();
+    let dialog_width = 50u16;
+    let dialog_height = (count as u16).saturating_add(4);
+
+    let x = area.x + area.width.saturating_sub(dialog_width) / 2;
+    let y = area.y + area.height.saturating_sub(dialog_height) / 2;
+    let dialog_rect = Rect::new(
+        x,
+        y,
+        dialog_width.min(area.width),
+        dialog_height.min(area.height),
+    );
+
+    if dialog_rect.height < 4 {
+        return;
+    }
+
+    frame.render_widget(Clear, dialog_rect);
+
+    let outer_block = Block::default()
+        .title(" ペイン一覧 ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FOCUS_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    frame.render_widget(outer_block, dialog_rect);
+
+    let inner = Rect::new(
+        dialog_rect.x + 2,
+        dialog_rect.y + 1,
+        dialog_rect.width.saturating_sub(4),
+        dialog_rect.height.saturating_sub(2),
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, &pane_id) in overlay.pane_ids.iter().enumerate() {
+        let label = app.ai_titles.get(&pane_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Pane {}", pane_id));
+
+        let status_dot = if app.config.features.status_dot {
+            let pane_status = app.pane_status(pane_id);
+            match pane_status {
+                PaneStatus::Idle => "",
+                PaneStatus::Running => "\u{1f535} ",
+                PaneStatus::Done => "\u{1f7e2} ",
+                PaneStatus::Waiting => "\u{1f7e1} ",
+            }
+        } else {
+            ""
+        };
+
+        let branch_name = app.ws().panes.get(&pane_id)
+            .and_then(|p| p.branch_name.as_deref())
+            .unwrap_or("");
+        let branch_part = if branch_name.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", branch_name)
+        };
+
+        let is_selected = i == overlay.selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(FOCUS_BORDER)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+
+        let marker = if is_selected { " > " } else { "   " };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+            Span::styled(format!("[{}] {}  {}{}", i, label, status_dot, branch_part), style),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k:移動  Enter:選択  Esc:閉じる",
         Style::default().fg(TEXT_DIM),
     )));
 

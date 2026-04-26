@@ -222,6 +222,13 @@ pub struct CopyModeState {
     pub scrollback_offset: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PaneListOverlay {
+    pub visible: bool,
+    pub selected: usize,
+    pub pane_ids: Vec<usize>,
+}
+
 /// Which border is being dragged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DragTarget {
@@ -605,6 +612,7 @@ pub struct App {
     pub worktree_cleanup_dialog: Option<WorktreeCleanupDialog>,
     pub prefix_active: bool,
     pub copy_mode: Option<CopyModeState>,
+    pub pane_list_overlay: PaneListOverlay,
 }
 
 impl App {
@@ -682,6 +690,7 @@ impl App {
             worktree_cleanup_dialog: None,
             prefix_active: false,
             copy_mode: None,
+            pane_list_overlay: PaneListOverlay::default(),
         };
 
         // Session restore takes priority over startup panes. Only apply startup
@@ -871,6 +880,11 @@ impl App {
             return self.handle_copy_mode_key(key);
         }
 
+        // Pane list overlay modal
+        if self.pane_list_overlay.visible {
+            return self.handle_pane_list_key(key);
+        }
+
         // Prefix key handling
         let prefix_key = parse_prefix_key(&self.config.keybindings.prefix);
         if let Some((prefix_mods, prefix_code)) = prefix_key {
@@ -894,6 +908,9 @@ impl App {
                     return Ok(true);
                 } else if key.code == KeyCode::Char('[') {
                     self.enter_copy_mode();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('w') {
+                    self.open_pane_list_overlay();
                     return Ok(true);
                 }
             }
@@ -2703,6 +2720,52 @@ impl App {
                 std::time::Instant::now(),
             ));
         }
+    }
+
+
+    fn open_pane_list_overlay(&mut self) {
+        let pane_ids = self.ws().layout.collect_pane_ids();
+        let focused = self.ws().focused_pane_id;
+        let selected = pane_ids.iter().position(|&id| id == focused).unwrap_or(0);
+        self.pane_list_overlay = PaneListOverlay {
+            visible: true,
+            selected,
+            pane_ids,
+        };
+        self.dirty = true;
+    }
+
+    fn handle_pane_list_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let len = self.pane_list_overlay.pane_ids.len();
+        if len == 0 {
+            self.pane_list_overlay.visible = false;
+            return Ok(true);
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.pane_list_overlay.selected = (self.pane_list_overlay.selected + 1) % len;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.pane_list_overlay.selected = (self.pane_list_overlay.selected + len - 1) % len;
+            }
+            KeyCode::Char(c @ '0'..='9') => {
+                let digit = (c as usize) - ('0' as usize);
+                self.pane_list_overlay.selected = digit.min(len.saturating_sub(1));
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(&selected_id) = self.pane_list_overlay.pane_ids.get(self.pane_list_overlay.selected) {
+                    self.ws_mut().focused_pane_id = selected_id;
+                }
+                self.pane_list_overlay.visible = false;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.pane_list_overlay.visible = false;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
     }
 
 
