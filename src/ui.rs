@@ -7,6 +7,7 @@ use ratatui::Frame;
 use crate::app::{
     App, CloseConfirmDialog, CloseConfirmFocus, DragTarget, FocusTarget,
     PaneCreateDialog, PaneCreateField, PaneStatus, WorktreeCleanupDialog, FEATURES,
+    SETTINGS_ITEMS,
 };
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
@@ -91,6 +92,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if app.feature_toggle.visible {
         render_feature_toggle(app, frame, area);
+    }
+
+    if app.settings_panel.visible {
+        render_settings_panel(app, frame, area);
+    }
+
+    if let Some((ref msg, _)) = app.status_flash {
+        render_status_flash(msg, frame, area);
     }
 
     if app.pane_create_dialog.visible {
@@ -1431,6 +1440,105 @@ fn render_worktree_cleanup_dialog(frame: &mut Frame, area: Rect, dialog: &Worktr
         Paragraph::new("[No]").style(no_style),
         Rect::new(inner.x + inner.width.saturating_sub(7), inner.y + 2, 4, 1),
     );
+}
+
+fn render_settings_panel(app: &App, frame: &mut Frame, area: Rect) {
+    let dialog_width = 60u16;
+    let dialog_height = (SETTINGS_ITEMS.len() as u16) + 6;
+
+    let x = area.x + area.width.saturating_sub(dialog_width) / 2;
+    let y = area.y + area.height.saturating_sub(dialog_height) / 2;
+    let dialog_rect = Rect::new(
+        x,
+        y,
+        dialog_width.min(area.width),
+        dialog_height.min(area.height),
+    );
+
+    frame.render_widget(Clear, dialog_rect);
+
+    let selected = app.settings_panel.selected;
+
+    let outer_block = Block::default()
+        .title(" \u{2699} 設定パネル ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FOCUS_BORDER))
+        .style(Style::default().bg(PANEL_BG));
+    frame.render_widget(outer_block, dialog_rect);
+
+    let inner = Rect::new(
+        dialog_rect.x + 2,
+        dialog_rect.y + 1,
+        dialog_rect.width.saturating_sub(4),
+        dialog_rect.height.saturating_sub(2),
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(""));
+
+    for (i, &(key_name, desc)) in SETTINGS_ITEMS.iter().enumerate() {
+        let is_selected = i == selected;
+        let value = app.get_setting_value(key_name);
+
+        let marker = if is_selected { " > " } else { "   " };
+
+        if is_selected && app.settings_panel.editing {
+            let display = format!("{}: [{}_ ]", desc, app.settings_panel.edit_buffer);
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+                Span::styled(
+                    display,
+                    Style::default()
+                        .fg(Color::Rgb(0xff, 0xd7, 0x00))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            let display = format!("{}: {}", desc, value);
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(FOCUS_BORDER)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
+                Span::styled(display, style),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k: 移動  Enter: 編集  q: 閉じる",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
+}
+
+fn render_status_flash(msg: &str, frame: &mut Frame, area: Rect) {
+    let msg_width = unicode_width::UnicodeWidthStr::width(msg) as u16 + 4;
+    let flash_width = msg_width.min(area.width);
+    let x = area.x + area.width.saturating_sub(flash_width) / 2;
+    let y = area.y + area.height.saturating_sub(2);
+    let flash_rect = Rect::new(x, y, flash_width, 1);
+
+    let widget = Paragraph::new(format!(" {} ", msg))
+        .style(
+            Style::default()
+                .fg(Color::Rgb(0xff, 0xd7, 0x00))
+                .bg(Color::Rgb(0x2e, 0x2a, 0x1a))
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center);
+    frame.render_widget(widget, flash_rect);
 }
 
 fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
