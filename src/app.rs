@@ -924,6 +924,25 @@ impl App {
             // No selection — fall through to forward Ctrl+C to PTY
         }
 
+        // Ctrl+Y — copy focused pane's visible content to clipboard
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
+            let content = {
+                let pane_id = self.ws().focused_pane_id;
+                self.ws().panes.get(&pane_id)
+                    .map(|p| p.parser.lock().unwrap_or_else(|e| e.into_inner()).screen().contents())
+                    .unwrap_or_default()
+            };
+            if content.trim().is_empty() {
+                self.status_flash = Some(("クリップボードにコピーするコンテンツがありません".to_string(), std::time::Instant::now()));
+            } else {
+                self.copy_to_clipboard(&content);
+                let lines = content.lines().count();
+                self.status_flash = Some((format!("コピーしました（{}行）", lines), std::time::Instant::now()));
+            }
+            self.dirty = true;
+            return Ok(true);
+        }
+
         // Ctrl+T / Alt+T — new tab (Alt+T groups with Alt-based tab nav)
         if (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
