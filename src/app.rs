@@ -1995,6 +1995,14 @@ impl App {
                     }
                 });
             }
+        } else if !worktree_enabled && !branch_name.is_empty() {
+            // Non-worktree branch: run `git checkout -b <branch>` in the new pane's shell.
+            // Shell-quote the branch name to handle special characters safely.
+            let quoted = format!("'{}'", branch_name.replace('\'', "'\\''"));
+            let cmd = format!("git checkout -b {}\n", quoted);
+            if let Some(pane) = self.ws_mut().panes.get_mut(&pane_id) {
+                let _ = pane.write_input(cmd.as_bytes());
+            }
         }
 
         Ok(())
