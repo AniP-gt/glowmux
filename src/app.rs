@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
@@ -7,19 +7,63 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::config::ConfigFile;
+use crate::ai_title;
+use crate::config::{ConfigFile, FeaturesConfig};
 use crate::filetree::FileTree;
+use crate::hooks::HookEvent;
 use crate::pane::Pane;
 use crate::preview::Preview;
 
 /// Events dispatched within the app.
 pub enum AppEvent {
     /// PTY output received for a pane.
-    PtyOutput(#[allow(dead_code)] usize),
+    PtyOutput(usize),
     /// PTY process exited for a pane.
     PtyEof(usize),
     /// Shell changed working directory (pane_id, new path).
     CwdChanged(usize, PathBuf),
+    /// Hook event received from Unix socket server.
+    HookReceived { pane_id: usize, event: HookEvent },
+    /// AI title generation completed.
+    AiTitleGenerated { pane_id: usize, title: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PaneStatus {
+    Idle,
+    Running,
+    Done,
+    Waiting,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneState {
+    pub status: PaneStatus,
+    pub dismissed: bool,
+}
+
+impl Default for PaneState {
+    fn default() -> Self {
+        Self {
+            status: PaneStatus::Idle,
+            dismissed: false,
+        }
+    }
+}
+
+pub const FEATURES: &[(&str, &str)] = &[
+    ("status_dot", "状態ドット"),
+    ("status_bg_color", "背景色変化"),
+    ("status_bar", "ステータスバー"),
+    ("ai_title", "AIタイトル"),
+    ("zoom", "ズーム"),
+];
+
+#[derive(Debug, Clone)]
+pub struct FeatureToggleState {
+    pub visible: bool,
+    pub selected: usize,
+    pub pending: FeaturesConfig,
 }
 
 /// Split direction for layout.
@@ -430,11 +474,17 @@ pub struct App {
     clipboard: Option<arboard::Clipboard>,
     // Image preview protocol picker
     pub image_picker: Option<ratatui_image::picker::Picker>,
-    #[allow(dead_code)]
     pub config: ConfigFile,
     pub zoomed_pane_id: Option<usize>,
     pub pre_zoom_layout: Option<LayoutNode>,
     pub layout_picker: LayoutPickerState,
+    pub pane_states: HashMap<usize, PaneState>,
+    pub ai_title_enabled: bool,
+    pub feature_toggle: FeatureToggleState,
+    pub pane_output_rings: HashMap<usize, VecDeque<String>>,
+    pub last_ai_title_request: HashMap<usize, Instant>,
+    pub ai_titles: HashMap<usize, String>,
+    pub tokio_handle: Option<tokio::runtime::Handle>,
 }
 
 impl App {
@@ -448,6 +498,8 @@ impl App {
         let name = dir_name(&cwd);
 
         let ws = Workspace::new(name, cwd, 1, pane_rows, pane_cols, event_tx.clone())?;
+
+        let ai_title_enabled_init = config.features.ai_title;
 
         let mut app = Self {
             workspaces: vec![ws],
@@ -483,6 +535,17 @@ impl App {
             zoomed_pane_id: None,
             pre_zoom_layout: None,
             layout_picker: LayoutPickerState::default(),
+            pane_states: HashMap::new(),
+            ai_title_enabled: ai_title_enabled_init,
+            feature_toggle: FeatureToggleState {
+                visible: false,
+                selected: 0,
+                pending: FeaturesConfig::default(),
+            },
+            pane_output_rings: HashMap::new(),
+            last_ai_title_request: HashMap::new(),
+            ai_titles: HashMap::new(),
+            tokio_handle: None,
         };
 
         if app.config.startup.enabled && app.config.startup.panes.len() > 1 {
@@ -620,6 +683,11 @@ impl App {
             return Ok(self.handle_rename_key(key));
         }
 
+        // Feature toggle dialog
+        if self.feature_toggle.visible {
+            return self.handle_feature_toggle_key(key);
+        }
+
         // Layout picker mode
         if self.layout_picker.visible {
             return self.handle_layout_picker_key(key);
@@ -714,6 +782,26 @@ impl App {
             && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
         {
             self.toggle_zoom();
+            return Ok(true);
+        }
+
+        // Alt+A — toggle AI title generation
+        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('a') {
+            self.ai_title_enabled = !self.ai_title_enabled;
+            self.config.features.ai_title = self.ai_title_enabled;
+            self.dirty = true;
+            return Ok(true);
+        }
+
+        // ? — feature toggle dialog (pane focus only)
+        if key.modifiers == KeyModifiers::NONE
+            && key.code == KeyCode::Char('?')
+            && self.ws().focus_target == FocusTarget::Pane
+        {
+            self.feature_toggle.visible = true;
+            self.feature_toggle.selected = 0;
+            self.feature_toggle.pending = self.config.features.clone();
+            self.dirty = true;
             return Ok(true);
         }
 
@@ -1136,8 +1224,12 @@ impl App {
             pane.kill();
         }
 
-        // Clean up claude monitor state for this pane
+        // Clean up state maps for this pane
         self.claude_monitor.remove(focused);
+        self.pane_states.remove(&focused);
+        self.pane_output_rings.remove(&focused);
+        self.ai_titles.remove(&focused);
+        self.last_ai_title_request.remove(&focused);
         let ws = self.ws_mut();
 
         let remaining_ids = ws.layout.collect_pane_ids();
@@ -1346,6 +1438,12 @@ impl App {
     }
 
     fn handle_layout_picker_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Ctrl+Q always quits, even when dialog is open
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+            self.should_quit = true;
+            return Ok(true);
+        }
+
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Char('1')) => {
                 self.apply_layout_mode(LayoutMode::Stack);
@@ -1395,6 +1493,50 @@ impl App {
             }
             (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
                 self.layout_picker.selected = (self.layout_picker.selected + 1) % 6;
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+    fn handle_feature_toggle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Ctrl+Q always quits, even when dialog is open
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+            self.should_quit = true;
+            return Ok(true);
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.feature_toggle.selected =
+                    (self.feature_toggle.selected + 1) % FEATURES.len();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.feature_toggle.selected = if self.feature_toggle.selected == 0 {
+                    FEATURES.len() - 1
+                } else {
+                    self.feature_toggle.selected - 1
+                };
+            }
+            KeyCode::Char(' ') => {
+                let (key_name, _) = FEATURES[self.feature_toggle.selected];
+                let current = self.feature_toggle.pending.get_by_key(key_name);
+                self.feature_toggle.pending.set_by_key(key_name, !current);
+            }
+            // Only close dialog on plain 'q' (no modifiers) or Enter
+            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                self.config.features = self.feature_toggle.pending.clone();
+                self.ai_title_enabled = self.config.features.ai_title;
+                self.feature_toggle.visible = false;
+            }
+            KeyCode::Enter => {
+                self.config.features = self.feature_toggle.pending.clone();
+                self.ai_title_enabled = self.config.features.ai_title;
+                self.feature_toggle.visible = false;
+            }
+            KeyCode::Esc => {
+                self.feature_toggle.visible = false;
             }
             _ => {}
         }
@@ -1491,6 +1633,7 @@ impl App {
         }
 
         if let Some(new_id) = best_id {
+            self.dismiss_done_on_focus(new_id);
             self.ws_mut().focused_pane_id = new_id;
             self.dirty = true;
         }
@@ -1531,6 +1674,8 @@ impl App {
                 }
             }
         }
+        let new_id = self.ws().focused_pane_id;
+        self.dismiss_done_on_focus(new_id);
     }
 
     /// Cycle focus backward
@@ -1573,6 +1718,8 @@ impl App {
                 }
             }
         }
+        let new_id = self.ws().focused_pane_id;
+        self.dismiss_done_on_focus(new_id);
     }
 
     /// Scroll a pane based on scrollbar click position.
@@ -1754,6 +1901,7 @@ impl App {
                     {
                         self.ws_mut().focused_pane_id = pane_id;
                         self.ws_mut().focus_target = FocusTarget::Pane;
+                        self.dismiss_done_on_focus(pane_id);
 
                         // Check if clicking on scrollbar (rightmost column inside border)
                         let scrollbar_col = rect.x + rect.width - 2; // -1 border, -1 scrollbar
@@ -2142,13 +2290,122 @@ impl App {
                         }
                     }
                 }
-                AppEvent::PtyOutput(_) => {}
+                AppEvent::PtyOutput(pane_id) => {
+                    let last_line: Option<String> = 'outer: {
+                        for ws in &self.workspaces {
+                            if let Some(pane) = ws.panes.get(&pane_id) {
+                                let Ok(parser) = pane.parser.lock() else { break 'outer None; };
+                                let screen = parser.screen();
+                                let (rows, cols) = screen.size();
+                                let last_row = rows.saturating_sub(1);
+                                let mut line = String::new();
+                                for col in 0..cols {
+                                    if let Some(cell) = screen.cell(last_row, col) {
+                                        let c = cell.contents();
+                                        if c.is_empty() {
+                                            line.push(' ');
+                                        } else {
+                                            line.push_str(c);
+                                        }
+                                    }
+                                }
+                                break 'outer Some(line.trim_end().to_string());
+                            }
+                        }
+                        None
+                    };
+
+                    if let Some(line) = &last_line {
+                        if !line.is_empty() {
+                            let ring = self.pane_output_rings.entry(pane_id).or_default();
+                            ring.push_back(line.clone());
+                            if ring.len() > 50 {
+                                ring.pop_front();
+                            }
+                        }
+                    }
+
+                    if self.ai_title_enabled {
+                        if let Some(line) = &last_line {
+                            if ai_title::detect_prompt_return(line) {
+                                let interval = self.config.ai_title_engine.update_interval_sec;
+                                let should_request = self.last_ai_title_request
+                                    .get(&pane_id)
+                                    .map(|t| t.elapsed().as_secs() >= interval)
+                                    .unwrap_or(true);
+                                if should_request {
+                                    if let Some(ring) = self.pane_output_rings.get(&pane_id) {
+                                        let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
+                                        let tx = self.event_tx.clone();
+                                        if let Some(handle) = &self.tokio_handle {
+                                            self.last_ai_title_request.insert(pane_id, Instant::now());
+                                            let config = self.config.ai_title_engine.clone();
+                                            let ollama_url = self.config.ai.ollama.base_url.clone();
+                                            let ollama_model = self.config.ai.ollama.model.clone();
+                                            handle.spawn(async move {
+                                                if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model).await {
+                                                    let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                AppEvent::HookReceived { pane_id, event } => {
+                    let pane_exists = self.workspaces.iter()
+                        .any(|ws| ws.panes.contains_key(&pane_id));
+                    if pane_exists {
+                        let state = self.pane_states.entry(pane_id).or_default();
+                        match event {
+                            HookEvent::Stop => {
+                                state.status = PaneStatus::Done;
+                                state.dismissed = false;
+                            }
+                            HookEvent::UserPromptSubmit | HookEvent::PreToolUse => {
+                                state.status = PaneStatus::Running;
+                                state.dismissed = false;
+                            }
+                            HookEvent::Notification => {
+                                state.status = PaneStatus::Waiting;
+                                state.dismissed = false;
+                            }
+                        }
+                    }
+                }
+                AppEvent::AiTitleGenerated { pane_id, title } => {
+                    self.ai_titles.insert(pane_id, title);
+                }
             }
         }
         if had_events {
             self.dirty = true;
         }
         had_events
+    }
+
+    pub fn dismiss_done_on_focus(&mut self, pane_id: usize) {
+        if let Some(state) = self.pane_states.get_mut(&pane_id) {
+            if state.status == PaneStatus::Done {
+                state.dismissed = true;
+            }
+        }
+    }
+
+    pub fn pane_status(&self, pane_id: usize) -> PaneStatus {
+        self.pane_states
+            .get(&pane_id)
+            .map(|s| s.status)
+            .unwrap_or(PaneStatus::Idle)
+    }
+
+    pub fn pane_state_dismissed(&self, pane_id: usize) -> bool {
+        self.pane_states
+            .get(&pane_id)
+            .map(|s| s.dismissed)
+            .unwrap_or(false)
     }
 
     pub fn shutdown(&mut self) {

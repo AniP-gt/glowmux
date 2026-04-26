@@ -24,3 +24,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 ratatui-image = { version = "10", default-features = false, features = ["crossterm"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "process"] }
