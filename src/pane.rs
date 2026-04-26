@@ -23,6 +23,10 @@ pub struct Pane {
     pub title: Arc<Mutex<String>>,
     pub cwd: PathBuf,
     pub total_scrollback: Arc<std::sync::atomic::AtomicUsize>,
+    pub worktree_path: Option<PathBuf>,
+    pub branch_name: Option<String>,
+    /// Agent command to launch after worktree cd completes (e.g. "claude")
+    pub pending_agent: Option<String>,
 }
 
 impl Pane {
@@ -61,6 +65,7 @@ impl Pane {
         cmd.cwd(&work_dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("GLOWMUX", "1"); // marker to detect nested glowmux
+        cmd.env("GLOWMUX_PANE_ID", id.to_string()); // pane ID for hook scripts
 
         let child = pair
             .slave
@@ -105,6 +110,9 @@ impl Pane {
             title: pane_title,
             cwd: work_dir,
             total_scrollback: scrollback_counter,
+            worktree_path: None,
+            branch_name: None,
+            pending_agent: None,
         };
 
         // Inject OSC 7 hook after shell starts
@@ -229,6 +237,13 @@ impl Pane {
         }
     }
 
+    pub fn pane_cwd(&self) -> PathBuf {
+        if let Some(ref wt) = self.worktree_path {
+            return wt.clone();
+        }
+        self.cwd.clone()
+    }
+
     /// Kill the PTY child process.
     pub fn kill(&mut self) {
         let _ = self.child.kill();
@@ -279,16 +294,69 @@ fn pty_reader_thread(
                     }
                 }
 
+                // Extract printable lines from raw PTY bytes (strip ANSI, split on \n)
+                let lines = extract_printable_lines(data);
+
                 let mut parser = parser.lock().unwrap_or_else(|e| e.into_inner());
                 parser.process(data);
                 drop(parser);
-                let _ = event_tx.send(AppEvent::PtyOutput(pane_id));
+                let _ = event_tx.send(AppEvent::PtyOutput { pane_id, lines });
             }
             Err(_) => {
                 break;
             }
         }
     }
+}
+
+/// Strip ANSI escape sequences and extract non-empty printable lines from raw PTY bytes.
+/// Used to populate the pane output ring for AI title generation.
+fn extract_printable_lines(data: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(data);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequences: ESC [ ... final, ESC ] ... BEL/ST, ESC char
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    // CSI: consume until a byte in 0x40–0x7E
+                    for ch in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&ch) { break; }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // OSC: consume until BEL or ESC backslash
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' { break; }
+                        if ch == '\x1b' { chars.next(); break; } // ESC \
+                    }
+                }
+                _ => { chars.next(); } // ESC + single char
+            }
+        } else if c == '\r' {
+            // ignore CR
+        } else if c == '\n' {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                lines.push(trimmed);
+            }
+            current.clear();
+        } else if c.is_control() {
+            // skip other control chars
+        } else {
+            current.push(c);
+        }
+    }
+    // flush last partial line
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        lines.push(trimmed);
+    }
+    lines
 }
 
 /// Extract path from OSC 7 escape sequence: \x1b]7;file://HOST/PATH(\x07|\x1b\\)

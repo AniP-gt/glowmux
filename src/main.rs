@@ -8,8 +8,10 @@ mod hooks;
 mod pane;
 mod preview;
 mod runtime;
+mod session;
 mod ui;
 mod version_check;
+mod worktree;
 
 use std::io;
 use std::panic;
@@ -95,6 +97,9 @@ fn main() -> Result<()> {
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app);
+
+    // Save session before cleanup
+    app.save_session();
 
     // Cleanup
     app.shutdown();

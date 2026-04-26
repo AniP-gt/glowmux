@@ -93,6 +93,8 @@ pub struct LayoutConfig {
 pub struct StartupConfig {
     pub enabled: bool,
     pub panes: Vec<StartupPane>,
+    /// Default agent command pre-filled in the Ctrl+N pane create dialog (e.g. "claude")
+    pub default_agent: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -177,6 +179,11 @@ pub struct WorktreeConfig {
     pub base_dir: String,
     pub auto_branch: bool,
     pub branch_prefix: String,
+    pub close_confirm: bool,
+    pub close_worktree: String,
+    pub auto_create: bool,
+    /// Default branch name for merge detection (e.g. "main", "master")
+    pub main_branch: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -188,12 +195,12 @@ pub struct SessionConfig {
     pub restore_on_start: bool,
 }
 
-/// Key binding configuration. Fields are parsed from config.toml but runtime
-/// wiring is planned for Iteration 2. Currently the default values document
-/// the intended bindings; changing them in config.toml has no effect yet.
+/// Key binding configuration. `prefix` is active (ctrl+b default). Other fields
+/// document intended bindings; only `prefix` is wired to runtime behavior.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
+    pub prefix: String,
     pub zoom: String,
     pub layout_cycle: String,
     pub layout_picker: String,
@@ -260,6 +267,9 @@ impl Default for AiTitleConfig {
 #[serde(default)]
 pub struct AiTitleEngineConfig {
     pub backend: String,
+    /// Model override for claude-headless backend (e.g. "claude-haiku-4-5-20251001").
+    /// Empty string uses the claude CLI default.
+    pub model: String,
     pub max_chars: usize,
     pub timeout_sec: u64,
     pub update_interval_sec: u64,
@@ -269,6 +279,7 @@ impl Default for AiTitleEngineConfig {
     fn default() -> Self {
         Self {
             backend: "claude-headless".to_string(),
+            model: "claude-haiku-4-5-20251001".to_string(),
             max_chars: 20,
             timeout_sec: 5,
             update_interval_sec: 30,
@@ -334,6 +345,10 @@ impl Default for WorktreeConfig {
             base_dir: "~/worktrees".to_string(),
             auto_branch: true,
             branch_prefix: "feat/".to_string(),
+            close_confirm: false,
+            close_worktree: "ask".to_string(),
+            auto_create: false,
+            main_branch: "main".to_string(),
         }
     }
 }
@@ -352,6 +367,7 @@ impl Default for SessionConfig {
 impl Default for KeybindingsConfig {
     fn default() -> Self {
         Self {
+            prefix: "ctrl+b".to_string(),
             zoom: "alt+z".to_string(),
             layout_cycle: "ctrl+space".to_string(),
             layout_picker: "ctrl+l".to_string(),
