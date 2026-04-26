@@ -866,6 +866,10 @@ impl App {
                 } else if let KeyCode::Char('q') = key.code {
                     self.should_quit = true;
                     return Ok(true);
+                } else if key.code == KeyCode::Char(' ') {
+                    // Prefix + Space — cycle layout mode
+                    self.cycle_layout_mode();
+                    return Ok(true);
                 }
             }
         }
@@ -1008,12 +1012,6 @@ impl App {
             self.settings_panel.editing = false;
             self.settings_panel.edit_buffer.clear();
             self.dirty = true;
-            return Ok(true);
-        }
-
-        // Ctrl+Space — cycle layout mode
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(' ') {
-            self.cycle_layout_mode();
             return Ok(true);
         }
 
@@ -1695,7 +1693,7 @@ impl App {
                 self.apply_layout_mode(mode);
                 self.layout_picker.visible = false;
             }
-            (KeyModifiers::CONTROL, KeyCode::Char(' ')) => {
+            (KeyModifiers::NONE, KeyCode::Char(' ')) => {
                 self.layout_picker.selected = (self.layout_picker.selected + 1) % 6;
             }
             _ => {}
