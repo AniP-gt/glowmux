@@ -97,3 +97,56 @@ async fn run_ollama(url: &str, model: &str, prompt: &str) -> Option<String> {
     .flatten();
     result
 }
+
+pub async fn invoke_gemini(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    timeout_secs: u64,
+) -> Option<String> {
+    if api_key.is_empty() {
+        return None;
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        run_gemini(api_key.to_string(), model.to_string(), prompt.to_string()),
+    )
+    .await;
+    result.unwrap_or_default()
+}
+
+async fn run_gemini(api_key: String, model: String, prompt: String) -> Option<String> {
+    // Validate model name to prevent URL injection (allowlist: alphanumeric, dash, dot)
+    if !model.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.') {
+        return None;
+    }
+    // API key is passed as a header, not in the URL, to avoid exposure in process listings/logs
+    let endpoint = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        model
+    );
+    let body = serde_json::json!({
+        "contents": [{ "parts": [{ "text": prompt }] }]
+    });
+    let body_str = body.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        ureq::post(&endpoint)
+            .set("Content-Type", "application/json")
+            .set("x-goog-api-key", &api_key)
+            .send_string(&body_str)
+            .ok()
+            .and_then(|r| r.into_json::<serde_json::Value>().ok())
+            .and_then(|j| {
+                j["candidates"]
+                    .get(0)
+                    .and_then(|c| c["content"]["parts"].get(0))
+                    .and_then(|p| p["text"].as_str())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+    })
+    .await
+    .ok()
+    .flatten();
+    result
+}

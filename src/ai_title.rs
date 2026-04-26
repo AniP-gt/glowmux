@@ -5,12 +5,14 @@ use crate::config::AiTitleEngineConfig;
 pub enum AiTitleBackend {
     ClaudeHeadless,
     Ollama,
+    Gemini,
 }
 
 impl AiTitleBackend {
     pub fn from_str(s: &str) -> Self {
         match s {
             "ollama" => Self::Ollama,
+            "gemini" => Self::Gemini,
             _ => Self::ClaudeHeadless,
         }
     }
@@ -52,6 +54,8 @@ pub async fn generate_title(
     config: &AiTitleEngineConfig,
     ollama_url: &str,
     ollama_model: &str,
+    gemini_api_key: &str,
+    gemini_model: &str,
 ) -> Option<String> {
     if pane_output.trim().is_empty() {
         return None;
@@ -83,6 +87,18 @@ pub async fn generate_title(
         }
         AiTitleBackend::Ollama => {
             ai_invoke::invoke_ollama(ollama_url, ollama_model, &prompt, config.timeout_sec).await
+        }
+        AiTitleBackend::Gemini => {
+            if gemini_api_key.is_empty() {
+                ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
+            } else {
+                let result = ai_invoke::invoke_gemini(gemini_api_key, gemini_model, &prompt, config.timeout_sec).await;
+                if result.is_some() {
+                    result
+                } else {
+                    ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
+                }
+            }
         }
     };
 
