@@ -1,0 +1,95 @@
+name: Security Scan (Weekly)
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: security-weekly
+  cancel-in-progress: false
+
+jobs:
+  trivy-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create security label (idempotent)
+        run: |
+          gh label create security \
+            --color "d93f0b" \
+            --description "Security vulnerability" \
+            --force
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scanners: 'vuln'
+          format: 'table'
+          output: 'trivy-results.txt'
+          exit-code: '0'
+        continue-on-error: true
+
+      - name: Create issue if vulnerabilities found
+        uses: actions/github-script@v7
+        env:
+          TZ: UTC
+        with:
+          script: |
+            const fs = require('fs');
+
+            const scanDate = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD in UTC
+            const title = `Security Scan Report — ${scanDate}`;
+
+            let results;
+            const trivyFile = 'trivy-results.txt';
+            if (fs.existsSync(trivyFile)) {
+              results = fs.readFileSync(trivyFile, 'utf8').trim();
+              // results === '' means scan ran but found nothing — skip issue creation
+            } else {
+              throw new Error('trivy-results.txt not found — Trivy scan failed. Check Actions logs.');
+            }
+
+            if (!results) {
+              console.log('No vulnerabilities found — skipping issue creation.');
+              return;
+            }
+
+            const existingIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security',
+              state: 'open',
+              per_page: 100,
+            });
+
+            const duplicate = existingIssues.find(issue => issue.title === title);
+            if (duplicate) {
+              console.log(`Issue already exists: #${duplicate.number} — skipping.`);
+              return;
+            }
+
+            const maxLen = 60000;
+            let body = `Weekly Trivy vulnerability scan found the following issues. Please update affected dependencies.\n\n\`\`\`\n${results}\n\`\`\``;
+            if (body.length > maxLen) {
+              body = body.substring(0, maxLen) + '\n\n_Output truncated. See the Actions run logs for full results._';
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security'],
+            });
+
+            console.log(`Created issue: ${title}`);
