@@ -466,8 +466,10 @@ fn render_single_pane(
 
     let pane_title = if is_focused {
         format!(" \u{25cf} {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
+    } else if !status_dot.is_empty() {
+        format!(" {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
     } else {
-        format!("   {}{} [{}]{} ", status_dot, label, pane.id, claude_suffix)
+        format!("   {} [{}]{} ", label, pane.id, claude_suffix)
     };
 
     let title_style = if is_focused && is_claude {
