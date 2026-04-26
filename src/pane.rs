@@ -23,6 +23,8 @@ pub struct Pane {
     pub title: Arc<Mutex<String>>,
     pub cwd: PathBuf,
     pub total_scrollback: Arc<std::sync::atomic::AtomicUsize>,
+    pub worktree_path: Option<PathBuf>,
+    pub branch_name: Option<String>,
 }
 
 impl Pane {
@@ -105,6 +107,8 @@ impl Pane {
             title: pane_title,
             cwd: work_dir,
             total_scrollback: scrollback_counter,
+            worktree_path: None,
+            branch_name: None,
         };
 
         // Inject OSC 7 hook after shell starts
@@ -227,6 +231,13 @@ impl Pane {
         } else {
             false
         }
+    }
+
+    pub fn pane_cwd(&self) -> PathBuf {
+        if let Some(ref wt) = self.worktree_path {
+            return wt.clone();
+        }
+        self.cwd.clone()
     }
 
     /// Kill the PTY child process.

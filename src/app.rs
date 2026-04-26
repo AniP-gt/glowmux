@@ -15,6 +15,7 @@ use crate::pane::Pane;
 use crate::preview::Preview;
 
 /// Events dispatched within the app.
+#[allow(dead_code)]
 pub enum AppEvent {
     /// PTY output received for a pane.
     PtyOutput(usize),
@@ -26,6 +27,16 @@ pub enum AppEvent {
     HookReceived { pane_id: usize, event: HookEvent },
     /// AI title generation completed.
     AiTitleGenerated { pane_id: usize, title: String },
+    /// AI branch name generation completed.
+    BranchNameGenerated { branch: String },
+    /// Async worktree creation completed successfully.
+    WorktreeCreated { pane_id: usize, cwd: std::path::PathBuf, branch_name: String },
+    /// Async worktree creation failed.
+    WorktreeCreateFailed { pane_id: usize, branch_name: String, error: String },
+    /// Worktree branch has been merged into main.
+    WorktreeMerged { worktree_path: std::path::PathBuf },
+    /// Worktree list refresh completed.
+    WorktreesListed { worktrees: Vec<crate::worktree::WorktreeInfo> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -105,6 +116,74 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneCreateField {
+    BranchName,
+    WorktreeToggle,
+    AgentField,
+    AiGenerate,
+    OkButton,
+    CancelButton,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneCreateDialog {
+    pub visible: bool,
+    pub branch_name: String,
+    pub worktree_enabled: bool,
+    pub agent: String,
+    pub generating_name: bool,
+    pub focused_field: PaneCreateField,
+    pub error_msg: Option<String>,
+}
+
+impl Default for PaneCreateDialog {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            branch_name: String::new(),
+            worktree_enabled: false,
+            agent: String::new(),
+            generating_name: false,
+            focused_field: PaneCreateField::BranchName,
+            error_msg: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CloseConfirmFocus {
+    Yes,
+    No,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloseConfirmDialog {
+    pub visible: bool,
+    pub pane_id: usize,
+    pub worktree_path: Option<std::path::PathBuf>,
+    pub focused: CloseConfirmFocus,
+}
+
+impl Default for CloseConfirmDialog {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            pane_id: 0,
+            worktree_path: None,
+            focused: CloseConfirmFocus::No,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeCleanupDialog {
+    pub visible: bool,
+    pub worktree_path: std::path::PathBuf,
+    pub branch: String,
+    pub focused: CloseConfirmFocus,
 }
 
 /// Which border is being dragged.
@@ -377,6 +456,7 @@ pub struct Workspace {
     pub last_file_tree_rect: Option<Rect>,
     pub last_preview_rect: Option<Rect>,
     pub layout_mode: LayoutMode,
+    pub worktrees: Vec<crate::worktree::WorktreeInfo>,
 }
 
 impl Workspace {
@@ -407,6 +487,7 @@ impl Workspace {
             last_file_tree_rect: None,
             last_preview_rect: None,
             layout_mode: LayoutMode::Auto,
+            worktrees: Vec::new(),
         })
     }
 
@@ -485,6 +566,10 @@ pub struct App {
     pub last_ai_title_request: HashMap<usize, Instant>,
     pub ai_titles: HashMap<usize, String>,
     pub tokio_handle: Option<tokio::runtime::Handle>,
+    pub pane_create_dialog: PaneCreateDialog,
+    pub close_confirm_dialog: CloseConfirmDialog,
+    pub worktree_cleanup_dialog: Option<WorktreeCleanupDialog>,
+    pub prefix_active: bool,
 }
 
 impl App {
@@ -500,6 +585,7 @@ impl App {
         let ws = Workspace::new(name, cwd, 1, pane_rows, pane_cols, event_tx.clone())?;
 
         let ai_title_enabled_init = config.features.ai_title;
+        let worktree_auto_create = config.worktree.auto_create;
 
         let mut app = Self {
             workspaces: vec![ws],
@@ -546,9 +632,36 @@ impl App {
             last_ai_title_request: HashMap::new(),
             ai_titles: HashMap::new(),
             tokio_handle: None,
+            pane_create_dialog: PaneCreateDialog {
+                worktree_enabled: worktree_auto_create,
+                ..Default::default()
+            },
+            close_confirm_dialog: CloseConfirmDialog::default(),
+            worktree_cleanup_dialog: None,
+            prefix_active: false,
         };
 
-        if app.config.startup.enabled && app.config.startup.panes.len() > 1 {
+        // Session restore takes priority over startup panes. Only apply startup
+        // panes when no saved session is loaded.
+        let mut session_restored = false;
+        if app.config.session.enabled && app.config.session.restore_on_start {
+            if let Some(session_path) = crate::session::SessionData::session_path() {
+                if session_path.exists() {
+                    if let Some(session) = crate::session::SessionData::load(&session_path) {
+                        if !session.workspaces.is_empty() {
+                            let tx = app.event_tx.clone();
+                            if restore_session_workspaces(
+                                &mut app, &session, pane_rows, pane_cols, &tx,
+                            ).is_ok() {
+                                session_restored = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !session_restored && app.config.startup.enabled && !app.config.startup.panes.is_empty() {
             app.apply_startup_panes(pane_rows, pane_cols)?;
         }
 
@@ -691,6 +804,47 @@ impl App {
         // Layout picker mode
         if self.layout_picker.visible {
             return self.handle_layout_picker_key(key);
+        }
+
+        // Pane create dialog
+        if self.pane_create_dialog.visible {
+            return self.handle_pane_create_key(key);
+        }
+        // Close confirm dialog
+        if self.close_confirm_dialog.visible {
+            return self.handle_close_confirm_key(key);
+        }
+        // Worktree cleanup dialog
+        if self.worktree_cleanup_dialog.as_ref().is_some_and(|d| d.visible) {
+            return self.handle_worktree_cleanup_key(key);
+        }
+
+        // Prefix key handling
+        let prefix_key = parse_prefix_key(&self.config.keybindings.prefix);
+        if let Some((prefix_mods, prefix_code)) = prefix_key {
+            if !self.prefix_active {
+                if key.modifiers == prefix_mods && key.code == prefix_code {
+                    self.prefix_active = true;
+                    self.dirty = true;
+                    return Ok(true);
+                }
+            } else {
+                self.prefix_active = false;
+                self.dirty = true;
+                if key.modifiers == prefix_mods && key.code == prefix_code {
+                    // Prefix pressed twice: fall through to PTY passthrough
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            self.should_quit = true;
+                            return Ok(true);
+                        }
+                        // Unknown prefix command — fall through to normal dispatch
+                        // so the key is not silently swallowed
+                        _ => {}
+                    }
+                }
+            }
         }
 
         // Ctrl+Q — quit
@@ -908,19 +1062,41 @@ impl App {
             }
             (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
                 if self.ws().focus_target == FocusTarget::Preview {
-                    // Close preview and return to pane
                     self.ws_mut().preview.close();
                     self.ws_mut().focus_target = FocusTarget::Pane;
-                    Ok(true)
-                } else if multi_pane {
-                    self.close_focused_pane();
-                    Ok(true)
-                } else if multi_tab {
-                    self.close_tab(self.active_tab);
+                    return Ok(true);
+                }
+                if multi_pane || multi_tab {
+                    let pane_id = self.ws().focused_pane_id;
+                    if self.config.worktree.close_confirm {
+                        let worktree_path = self.ws().panes.get(&pane_id)
+                            .and_then(|p| p.worktree_path.clone());
+                        self.close_confirm_dialog = CloseConfirmDialog {
+                            visible: true,
+                            pane_id,
+                            worktree_path,
+                            focused: CloseConfirmFocus::No,
+                        };
+                        self.dirty = true;
+                    } else if multi_pane {
+                        self.close_focused_pane();
+                    } else {
+                        self.close_tab(self.active_tab);
+                    }
                     Ok(true)
                 } else {
                     Ok(false)
                 }
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                self.pane_create_dialog = PaneCreateDialog {
+                    visible: true,
+                    worktree_enabled: self.config.worktree.auto_create,
+                    focused_field: PaneCreateField::BranchName,
+                    ..Default::default()
+                };
+                self.dirty = true;
+                Ok(true)
             }
             _ => Ok(false),
         }
@@ -1542,6 +1718,326 @@ impl App {
         }
         self.dirty = true;
         Ok(true)
+    }
+
+    fn handle_pane_create_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.pane_create_dialog.visible = false;
+                self.dirty = true;
+            }
+            KeyCode::Tab => {
+                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => PaneCreateField::WorktreeToggle,
+                    PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
+                    PaneCreateField::AgentField => PaneCreateField::AiGenerate,
+                    PaneCreateField::AiGenerate => PaneCreateField::OkButton,
+                    PaneCreateField::OkButton => PaneCreateField::CancelButton,
+                    PaneCreateField::CancelButton => PaneCreateField::BranchName,
+                };
+                self.dirty = true;
+            }
+            KeyCode::BackTab => {
+                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
+                    PaneCreateField::BranchName => PaneCreateField::CancelButton,
+                    PaneCreateField::WorktreeToggle => PaneCreateField::BranchName,
+                    PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
+                    PaneCreateField::AiGenerate => PaneCreateField::AgentField,
+                    PaneCreateField::OkButton => PaneCreateField::AiGenerate,
+                    PaneCreateField::CancelButton => PaneCreateField::OkButton,
+                };
+                self.dirty = true;
+            }
+            KeyCode::Enter => {
+                let field = self.pane_create_dialog.focused_field.clone();
+                match field {
+                    PaneCreateField::CancelButton => {
+                        self.pane_create_dialog.visible = false;
+                        self.dirty = true;
+                    }
+                    PaneCreateField::WorktreeToggle => {
+                        self.pane_create_dialog.worktree_enabled =
+                            !self.pane_create_dialog.worktree_enabled;
+                        self.dirty = true;
+                    }
+                    PaneCreateField::AiGenerate => {
+                        if !self.pane_create_dialog.generating_name {
+                            self.start_branch_name_generation();
+                        }
+                    }
+                    PaneCreateField::OkButton | PaneCreateField::BranchName => {
+                        if !self.pane_create_dialog.generating_name {
+                            let branch = self.pane_create_dialog.branch_name.clone();
+                            let worktree = self.pane_create_dialog.worktree_enabled;
+                            self.pane_create_dialog.visible = false;
+                            self.create_pane_from_dialog(branch, worktree)?;
+                            self.dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            KeyCode::Backspace => {
+                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
+                    self.pane_create_dialog.branch_name.pop();
+                    self.dirty = true;
+                }
+            }
+            KeyCode::Char(c) => {
+                if self.pane_create_dialog.focused_field == PaneCreateField::BranchName {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
+                        self.pane_create_dialog.branch_name.push(c);
+                        self.dirty = true;
+                    }
+                } else if c == ' '
+                    && self.pane_create_dialog.focused_field == PaneCreateField::WorktreeToggle
+                {
+                    self.pane_create_dialog.worktree_enabled =
+                        !self.pane_create_dialog.worktree_enabled;
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn handle_close_confirm_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.close_confirm_dialog.visible = false;
+                self.dirty = true;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.close_confirm_dialog.focused = CloseConfirmFocus::Yes;
+                self.dirty = true;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.close_confirm_dialog.focused = CloseConfirmFocus::No;
+                self.dirty = true;
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let should_close = self.close_confirm_dialog.focused == CloseConfirmFocus::Yes
+                    || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                if should_close {
+                    let pane_id = self.close_confirm_dialog.pane_id;
+                    let worktree_path = self.close_confirm_dialog.worktree_path.clone();
+                    self.close_confirm_dialog.visible = false;
+                    if let Some(wt_path) = worktree_path {
+                        match self.config.worktree.close_worktree.as_str() {
+                            "auto" => {
+                                let repo_root = self.ws().cwd.clone();
+                                if let Some(handle) = &self.tokio_handle {
+                                    let path = wt_path.clone();
+                                    let root = repo_root.clone();
+                                    handle.spawn(async move {
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            crate::worktree::WorktreeManager::new().remove(&path, &root)
+                                        }).await;
+                                        if let Ok(Err(e)) = result {
+                                            eprintln!("glowmux: worktree remove failed: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            "ask" => {
+                                self.worktree_cleanup_dialog = Some(WorktreeCleanupDialog {
+                                    visible: true,
+                                    worktree_path: wt_path.clone(),
+                                    branch: self.ws().panes.values()
+                                        .find(|p| p.worktree_path.as_ref() == Some(&wt_path))
+                                        .and_then(|p| p.branch_name.clone())
+                                        .unwrap_or_default(),
+                                    focused: CloseConfirmFocus::No,
+                                });
+                            }
+                            _ => {} // "never"
+                        }
+                    }
+                    let multi_pane = self.ws().layout.pane_count() > 1;
+                    let multi_tab = self.workspaces.len() > 1;
+                    if multi_pane {
+                        self.ws_mut().focused_pane_id = pane_id;
+                        self.close_focused_pane();
+                    } else if multi_tab {
+                        self.close_tab(self.active_tab);
+                    }
+                    self.dirty = true;
+                } else {
+                    self.close_confirm_dialog.visible = false;
+                    self.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn handle_worktree_cleanup_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                if let Some(ref mut d) = self.worktree_cleanup_dialog {
+                    d.visible = false;
+                }
+                self.dirty = true;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if let Some(ref mut d) = self.worktree_cleanup_dialog {
+                    d.focused = CloseConfirmFocus::Yes;
+                }
+                self.dirty = true;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if let Some(ref mut d) = self.worktree_cleanup_dialog {
+                    d.focused = CloseConfirmFocus::No;
+                }
+                self.dirty = true;
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let should_delete = self
+                    .worktree_cleanup_dialog
+                    .as_ref()
+                    .map(|d| {
+                        d.focused == CloseConfirmFocus::Yes
+                            || matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+                    })
+                    .unwrap_or(false);
+                if should_delete {
+                    let path = self
+                        .worktree_cleanup_dialog
+                        .as_ref()
+                        .map(|d| d.worktree_path.clone());
+                    if let Some(p) = path {
+                        let repo_root = self.ws().cwd.clone();
+                        if let Some(handle) = &self.tokio_handle {
+                            let root = repo_root.clone();
+                            handle.spawn(async move {
+                                let result = tokio::task::spawn_blocking(move || {
+                                    crate::worktree::WorktreeManager::new().remove(&p, &root)
+                                }).await;
+                                if let Ok(Err(e)) = result {
+                                    eprintln!("glowmux: worktree remove failed: {}", e);
+                                }
+                            });
+                        }
+                    }
+                }
+                if let Some(ref mut d) = self.worktree_cleanup_dialog {
+                    d.visible = false;
+                }
+                self.dirty = true;
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    fn start_branch_name_generation(&mut self) {
+        if let Some(handle) = &self.tokio_handle {
+            self.pane_create_dialog.generating_name = true;
+            let tx = self.event_tx.clone();
+            let config = self.config.ai.clone();
+            let context = self.pane_create_dialog.branch_name.clone();
+            handle.spawn(async move {
+                let result = crate::worktree::generate_branch_name(&context, &config).await;
+                let branch = result.unwrap_or_default();
+                let _ = tx.send(AppEvent::BranchNameGenerated { branch });
+            });
+        }
+    }
+
+    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool) -> Result<()> {
+        let (cols, rows) = self.last_term_size;
+        let pane_id = self.next_pane_id;
+        self.next_pane_id = self.next_pane_id.wrapping_add(1);
+
+        let cwd = self.ws().cwd.clone();
+        let pane_rows = rows.saturating_sub(5);
+        let pane_cols = cols.saturating_sub(2);
+        let mut pane = crate::pane::Pane::new(
+            pane_id, pane_rows, pane_cols, self.event_tx.clone(),
+        )?;
+
+        if !branch_name.is_empty() {
+            pane.branch_name = Some(branch_name.clone());
+        }
+
+        self.ws_mut().panes.insert(pane_id, pane);
+
+        let focused_id = self.ws().focused_pane_id;
+        self.ws_mut()
+            .layout
+            .split_pane(focused_id, pane_id, SplitDirection::Vertical);
+        self.ws_mut().focused_pane_id = pane_id;
+        self.mark_layout_change();
+
+        if worktree_enabled && !branch_name.is_empty() {
+            if let Some(handle) = &self.tokio_handle {
+                let tx = self.event_tx.clone();
+                let repo_root = cwd;
+                let branch = branch_name;
+                handle.spawn(async move {
+                    let branch_clone = branch.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let mgr = crate::worktree::WorktreeManager::new();
+                        mgr.create(&repo_root, &branch_clone)
+                    }).await;
+                    match result {
+                        Ok(Ok(path)) => {
+                            let _ = tx.send(AppEvent::WorktreeCreated { pane_id, cwd: path, branch_name: branch });
+                        }
+                        Ok(Err(e)) => {
+                            let _ = tx.send(AppEvent::WorktreeCreateFailed { pane_id, branch_name: branch, error: e.to_string() });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::WorktreeCreateFailed { pane_id, branch_name: branch, error: e.to_string() });
+                        }
+                    }
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn save_session(&self) {
+        if !self.config.session.enabled {
+            return;
+        }
+        let Some(path) = crate::session::SessionData::session_path() else {
+            return;
+        };
+
+        let workspaces: Vec<_> = self
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let panes: Vec<_> = ws
+                    .panes
+                    .values()
+                    .map(|p| crate::session::PaneSnapshot {
+                        id: p.id,
+                        cwd: p.pane_cwd(),
+                        title: self.ai_titles.get(&p.id).cloned().unwrap_or_default(),
+                        worktree_path: p.worktree_path.clone(),
+                        branch: p.branch_name.clone(),
+                    })
+                    .collect();
+                crate::session::WorkspaceSnapshot {
+                    name: ws.name.clone(),
+                    cwd: ws.cwd.clone(),
+                    panes,
+                    layout_mode: format!("{:?}", ws.layout_mode),
+                }
+            })
+            .collect();
+
+        let data = crate::session::SessionData {
+            version: 1,
+            workspaces,
+            active_tab: self.active_tab,
+        };
+        data.save(&path);
     }
 
     fn apply_startup_panes(&mut self, rows: u16, cols: u16) -> Result<()> {
@@ -2253,10 +2749,35 @@ impl App {
             had_events = true;
             match event {
                 AppEvent::PtyEof(pane_id) => {
+                    let worktree_path = self.find_pane(pane_id)
+                        .and_then(|p| p.worktree_path.clone());
+                    let branch = self.find_pane(pane_id)
+                        .and_then(|p| p.branch_name.clone());
+
                     for ws in &mut self.workspaces {
                         if let Some(pane) = ws.panes.get_mut(&pane_id) {
                             pane.exited = true;
                             break;
+                        }
+                    }
+
+                    if let (Some(wt_path), Some(_branch)) = (worktree_path, branch) {
+                        let close_worktree = self.config.worktree.close_worktree.clone();
+                        if close_worktree != "never" {
+                            if let Some(handle) = &self.tokio_handle {
+                                let tx = self.event_tx.clone();
+                                let main_branch = self.config.worktree.main_branch.clone();
+                                handle.spawn(async move {
+                                    let wt = wt_path.clone();
+                                    let merged = tokio::task::spawn_blocking(move || {
+                                        crate::worktree::WorktreeManager::new()
+                                            .check_merged(&wt, &main_branch)
+                                    }).await.unwrap_or(false);
+                                    if merged {
+                                        let _ = tx.send(AppEvent::WorktreeMerged { worktree_path: wt_path });
+                                    }
+                                });
+                            }
                         }
                     }
                 }
@@ -2378,6 +2899,79 @@ impl App {
                 AppEvent::AiTitleGenerated { pane_id, title } => {
                     self.ai_titles.insert(pane_id, title);
                 }
+                AppEvent::BranchNameGenerated { branch } => {
+                    self.pane_create_dialog.generating_name = false;
+                    if !branch.is_empty() {
+                        self.pane_create_dialog.branch_name = branch;
+                    }
+                }
+                AppEvent::WorktreeCreated { pane_id, cwd, branch_name: _ } => {
+                    for ws in &mut self.workspaces {
+                        if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                            pane.worktree_path = Some(cwd.clone());
+                            // Shell-quote the path to handle spaces and special characters
+                            let path_str = cwd.to_string_lossy();
+                            let quoted = format!("'{}'", path_str.replace('\'', "'\\''"));
+                            let cd_cmd = format!("cd {}\n", quoted);
+                            let _ = pane.write_input(cd_cmd.as_bytes());
+                            break;
+                        }
+                    }
+                    // Refresh worktree list asynchronously to avoid blocking the UI thread
+                    let repo_root = self.ws().cwd.clone();
+                    if let Some(handle) = &self.tokio_handle {
+                        let tx = self.event_tx.clone();
+                        handle.spawn(async move {
+                            if let Ok(worktrees) = tokio::task::spawn_blocking(move || {
+                                crate::worktree::WorktreeManager::new().list(&repo_root)
+                            }).await.unwrap_or(Err(anyhow::anyhow!("task failed"))) {
+                                let _ = tx.send(AppEvent::WorktreesListed { worktrees });
+                            }
+                        });
+                    }
+                }
+                AppEvent::WorktreeCreateFailed { pane_id: _, branch_name: _, error } => {
+                    eprintln!("glowmux: worktree create failed: {}", error);
+                    // Surface error in the dialog if it's still open, otherwise show in status
+                    if self.pane_create_dialog.visible {
+                        self.pane_create_dialog.error_msg = Some(format!("Worktree error: {}", error));
+                    }
+                    self.dirty = true;
+                }
+                AppEvent::WorktreeMerged { worktree_path } => {
+                    let close_worktree = self.config.worktree.close_worktree.clone();
+                    match close_worktree.as_str() {
+                        "auto" => {
+                            let repo_root = self.ws().cwd.clone();
+                            if let Some(handle) = &self.tokio_handle {
+                                let path = worktree_path;
+                                let root = repo_root;
+                                handle.spawn(async move {
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        crate::worktree::WorktreeManager::new().remove(&path, &root)
+                                    }).await;
+                                });
+                            }
+                        }
+                        "ask" => {
+                            let branch = self.workspaces.iter()
+                                .flat_map(|ws| ws.panes.values())
+                                .find(|p| p.worktree_path.as_ref() == Some(&worktree_path))
+                                .and_then(|p| p.branch_name.clone())
+                                .unwrap_or_default();
+                            self.worktree_cleanup_dialog = Some(WorktreeCleanupDialog {
+                                visible: true,
+                                worktree_path,
+                                branch,
+                                focused: CloseConfirmFocus::No,
+                            });
+                        }
+                        _ => {} // "never"
+                    }
+                }
+                AppEvent::WorktreesListed { worktrees } => {
+                    self.ws_mut().worktrees = worktrees;
+                }
             }
         }
         if had_events {
@@ -2408,6 +3002,12 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn find_pane(&self, pane_id: usize) -> Option<&crate::pane::Pane> {
+        self.workspaces.iter()
+            .flat_map(|ws| ws.panes.values())
+            .find(|p| p.id == pane_id)
+    }
+
     pub fn shutdown(&mut self) {
         for ws in &mut self.workspaces {
             ws.shutdown();
@@ -2416,10 +3016,83 @@ impl App {
 }
 
 /// Extract directory name from a path for tab title.
+fn parse_prefix_key(s: &str) -> Option<(KeyModifiers, KeyCode)> {
+    let s = s.trim().to_lowercase();
+    if let Some(key) = s.strip_prefix("ctrl+") {
+        let c = key.chars().next()?;
+        Some((KeyModifiers::CONTROL, KeyCode::Char(c)))
+    } else if let Some(key) = s.strip_prefix("alt+") {
+        let c = key.chars().next()?;
+        Some((KeyModifiers::ALT, KeyCode::Char(c)))
+    } else {
+        None
+    }
+}
+
 fn dir_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+fn restore_session_workspaces(
+    app: &mut App,
+    session: &crate::session::SessionData,
+    pane_rows: u16,
+    pane_cols: u16,
+    tx: &std::sync::mpsc::Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    if session.workspaces.first().is_none() {
+        return Err(anyhow::anyhow!("empty session"));
+    }
+
+    for ws in &mut app.workspaces {
+        ws.shutdown();
+    }
+    app.workspaces.clear();
+
+    for ws_snap in &session.workspaces {
+        if ws_snap.panes.is_empty() {
+            continue;
+        }
+        let first_pane = &ws_snap.panes[0];
+        let pane_id = app.next_pane_id;
+        app.next_pane_id += 1;
+
+        let ws = Workspace::new(
+            ws_snap.name.clone(),
+            ws_snap.cwd.clone(),
+            pane_id,
+            pane_rows,
+            pane_cols,
+            tx.clone(),
+        )?;
+        app.workspaces.push(ws);
+
+        if !first_pane.title.is_empty() {
+            app.ai_titles.insert(pane_id, first_pane.title.clone());
+        }
+
+        let ws_idx = app.workspaces.len() - 1;
+        for pane_snap in ws_snap.panes.iter().skip(1) {
+            let new_pane_id = app.next_pane_id;
+            app.next_pane_id += 1;
+            let pane = crate::pane::Pane::new(new_pane_id, pane_rows, pane_cols, tx.clone())?;
+            let ws = &mut app.workspaces[ws_idx];
+            let focused = ws.focused_pane_id;
+            ws.panes.insert(new_pane_id, pane);
+            ws.layout.split_pane(focused, new_pane_id, SplitDirection::Vertical);
+            if !pane_snap.title.is_empty() {
+                app.ai_titles.insert(new_pane_id, pane_snap.title.clone());
+            }
+        }
+    }
+
+    if session.active_tab < app.workspaces.len() {
+        app.active_tab = session.active_tab;
+    }
+
+    Ok(())
 }
 
 /// Extract text from a pane's vt100 screen within a selection range.

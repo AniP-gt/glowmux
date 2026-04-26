@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, DragTarget, FocusTarget, PaneStatus, FEATURES};
+use crate::app::{
+    App, CloseConfirmDialog, CloseConfirmFocus, DragTarget, FocusTarget,
+    PaneCreateDialog, PaneCreateField, PaneStatus, WorktreeCleanupDialog, FEATURES,
+};
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
 const BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
@@ -88,6 +91,18 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if app.feature_toggle.visible {
         render_feature_toggle(app, frame, area);
+    }
+
+    if app.pane_create_dialog.visible {
+        render_pane_create_dialog(frame, area, &app.pane_create_dialog);
+    }
+    if app.close_confirm_dialog.visible {
+        render_close_confirm_dialog(frame, area, &app.close_confirm_dialog);
+    }
+    if let Some(ref d) = app.worktree_cleanup_dialog {
+        if d.visible {
+            render_worktree_cleanup_dialog(frame, area, d);
+        }
     }
 }
 
@@ -421,12 +436,17 @@ fn render_single_pane(
     };
 
     let is_scrolled = pane.is_scrolled_back();
-    let label = if let Some(title) = ai_title {
+    let base_label = if let Some(title) = ai_title {
         title.to_string()
     } else if is_claude {
         "claude".to_string()
     } else {
         "shell".to_string()
+    };
+    let label = if let Some(ref branch) = pane.branch_name {
+        format!("{} \u{2387}{}", base_label, branch)
+    } else {
+        base_label
     };
 
     let claude_suffix = if is_claude {
@@ -1032,6 +1052,25 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         ));
     }
 
+    // Worktrees count
+    let wt_count = app.ws().worktrees.len();
+    if wt_count > 0 {
+        right_spans.push(Span::styled(
+            format!(" worktrees:{} ", wt_count),
+            Style::default().fg(TEXT_DIM),
+        ));
+    }
+
+    // Prefix mode indicator
+    if app.prefix_active {
+        right_spans.push(Span::styled(
+            " [PREFIX] ",
+            Style::default()
+                .fg(Color::Rgb(0xff, 0xd7, 0x00))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // AI title indicator
     let ai_label = if app.ai_title_enabled { "AI:on" } else { "AI:off" };
     right_spans.push(Span::styled(
@@ -1182,6 +1221,195 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
         vt100::Color::Idx(idx) => Color::Indexed(idx),
         vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
+}
+
+fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateDialog) {
+    let popup_w = 50u16.min(area.width.saturating_sub(4));
+    let popup_h = 10u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" New Pane ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let hl = Style::default().fg(Color::Yellow);
+    let normal = Style::default().fg(TEXT);
+
+    let branch_style = if dialog.focused_field == PaneCreateField::BranchName { hl } else { normal };
+    let branch_text = format!("Branch: [{}]", dialog.branch_name);
+    frame.render_widget(
+        Paragraph::new(branch_text).style(branch_style),
+        Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
+    );
+
+    let wt_style = if dialog.focused_field == PaneCreateField::WorktreeToggle { hl } else { normal };
+    let wt_check = if dialog.worktree_enabled { "x" } else { " " };
+    let wt_text = format!("Worktree: [{}] create", wt_check);
+    frame.render_widget(
+        Paragraph::new(wt_text).style(wt_style),
+        Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1),
+    );
+
+    let agent_style = if dialog.focused_field == PaneCreateField::AgentField { hl } else { normal };
+    let agent_text = format!(
+        "Agent:  [{}]",
+        if dialog.agent.is_empty() { "none" } else { &dialog.agent }
+    );
+    frame.render_widget(
+        Paragraph::new(agent_text).style(agent_style),
+        Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
+    );
+
+    let ai_focused = dialog.focused_field == PaneCreateField::AiGenerate;
+    let ok_focused = dialog.focused_field == PaneCreateField::OkButton;
+    let cancel_focused = dialog.focused_field == PaneCreateField::CancelButton;
+
+    let ai_label = if dialog.generating_name { "[generating...]" } else { "[AI Generate]" };
+    let ai_style = if ai_focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let ok_style = if ok_focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if dialog.generating_name {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(ACCENT_GREEN)
+    };
+    let cancel_style = if cancel_focused {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    let buttons_y = inner.y + 4;
+    frame.render_widget(
+        Paragraph::new(ai_label).style(ai_style),
+        Rect::new(inner.x + 1, buttons_y, 15, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("[OK]").style(ok_style),
+        Rect::new(inner.x + inner.width.saturating_sub(16), buttons_y, 4, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("[Cancel]").style(cancel_style),
+        Rect::new(inner.x + inner.width.saturating_sub(10), buttons_y, 8, 1),
+    );
+
+    // Error message (shown when worktree creation fails)
+    if let Some(ref err) = dialog.error_msg {
+        let err_y = inner.y + inner.height.saturating_sub(2);
+        let err_text = err.as_str();
+        frame.render_widget(
+            Paragraph::new(err_text).style(Style::default().fg(Color::Red)),
+            Rect::new(inner.x + 1, err_y, inner.width.saturating_sub(2), 1),
+        );
+    }
+
+    // Hints
+    let hint_y = inner.y + inner.height.saturating_sub(1);
+    frame.render_widget(
+        Paragraph::new("Tab: next  Enter: confirm  Esc: cancel")
+            .style(Style::default().fg(TEXT_DIM)),
+        Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(2), 1),
+    );
+}
+
+fn render_close_confirm_dialog(frame: &mut Frame, area: Rect, dialog: &CloseConfirmDialog) {
+    let popup_w = 40u16.min(area.width.saturating_sub(4));
+    let popup_h = 5u16;
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let title = format!(" Close pane [{}]? ", dialog.pane_id);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let yes_style = if dialog.focused == CloseConfirmFocus::Yes {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ACCENT_GREEN)
+    };
+    let no_style = if dialog.focused == CloseConfirmFocus::No {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT)
+    };
+
+    frame.render_widget(
+        Paragraph::new("[Yes]").style(yes_style),
+        Rect::new(inner.x + 2, inner.y + 1, 5, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("[No]").style(no_style),
+        Rect::new(inner.x + inner.width.saturating_sub(7), inner.y + 1, 4, 1),
+    );
+}
+
+fn render_worktree_cleanup_dialog(frame: &mut Frame, area: Rect, dialog: &WorktreeCleanupDialog) {
+    let popup_w = 50u16.min(area.width.saturating_sub(4));
+    let popup_h = 6u16;
+    let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_area);
+
+    let title = format!(" Remove worktree [{}]? ", dialog.branch);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(PANEL_BG));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let msg = format!("Branch merged. Remove {}?", dialog.worktree_path.display());
+    let msg_trunc = truncate_to_width(&msg, inner.width.saturating_sub(2) as usize);
+    frame.render_widget(
+        Paragraph::new(msg_trunc).style(Style::default().fg(TEXT)),
+        Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
+    );
+
+    let yes_style = if dialog.focused == CloseConfirmFocus::Yes {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ACCENT_GREEN)
+    };
+    let no_style = if dialog.focused == CloseConfirmFocus::No {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT)
+    };
+
+    frame.render_widget(
+        Paragraph::new("[Yes]").style(yes_style),
+        Rect::new(inner.x + 2, inner.y + 2, 5, 1),
+    );
+    frame.render_widget(
+        Paragraph::new("[No]").style(no_style),
+        Rect::new(inner.x + inner.width.saturating_sub(7), inner.y + 2, 4, 1),
+    );
 }
 
 fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
