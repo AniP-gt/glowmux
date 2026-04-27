@@ -401,10 +401,11 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
     let focus_target = app.ws().focus_target;
     let selection = app.selection.clone();
     let show_status_dot = app.config.features.status_dot;
-    let show_status_bg = app.config.features.status_bg_color
-        && !app.config.status.respect_terminal_bg;
+    // When status_bg_color is explicitly enabled, force it regardless of respect_terminal_bg.
+    let show_status_bg = app.config.features.status_bg_color;
     let show_pane_numbers = app.config.pane.show_pane_numbers;
     let border_type = str_to_border_type(&app.config.pane.border_style);
+    let status_colors = StatusColors::from_config(&app.config.status);
     let copy_mode = app.copy_mode.clone();
     for (pane_id, rect) in rects {
         if let Some(pane) = app.ws().panes.get(&pane_id) {
@@ -428,6 +429,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 show_status_bg,
                 show_pane_numbers,
                 border_type,
+                &status_colors,
                 ai_title.as_deref(),
                 pane_copy_mode,
                 frame,
@@ -447,6 +449,57 @@ fn str_to_border_type(s: &str) -> BorderType {
     }
 }
 
+fn parse_color_str(s: &str) -> Option<Color> {
+    let s = s.trim();
+    if s.is_empty() || s == "reset" {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() == 6 {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            return Some(Color::Rgb(r, g, b));
+        }
+    }
+    match s {
+        "black"   => Some(Color::Black),
+        "red"     => Some(Color::Red),
+        "green"   => Some(Color::Green),
+        "yellow"  => Some(Color::Yellow),
+        "blue"    => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan"    => Some(Color::Cyan),
+        "white"   => Some(Color::White),
+        "gray" | "grey" => Some(Color::Gray),
+        _         => None,
+    }
+}
+
+/// Colors derived from the [status] config section.
+struct StatusColors {
+    running: Color,
+    done: Color,
+    waiting: Color,
+    bg_done: Color,
+    bg_waiting: Color,
+}
+
+impl StatusColors {
+    fn from_config(cfg: &crate::config::StatusConfig) -> Self {
+        let running = parse_color_str(&cfg.color_running).unwrap_or(Color::Cyan);
+        let done    = parse_color_str(&cfg.color_done).unwrap_or(Color::Green);
+        let waiting = parse_color_str(&cfg.color_waiting).unwrap_or(Color::Yellow);
+        // override_bg_* takes precedence; "reset"/empty falls back to the non-override value,
+        // then to BG so that "reset" semantics map to the app background rather than a magic color.
+        let bg_done_str = if cfg.override_bg_done.is_empty() { &cfg.bg_done } else { &cfg.override_bg_done };
+        let bg_waiting_str = if cfg.override_bg_waiting.is_empty() { &cfg.bg_waiting } else { &cfg.override_bg_waiting };
+        let bg_done    = parse_color_str(bg_done_str).unwrap_or(BG);
+        let bg_waiting = parse_color_str(bg_waiting_str).unwrap_or(BG);
+        Self { running, done, waiting, bg_done, bg_waiting }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_single_pane(
     pane: &crate::pane::Pane,
@@ -459,6 +512,7 @@ fn render_single_pane(
     show_status_bg: bool,
     show_pane_numbers: bool,
     border_type: BorderType,
+    status_colors: &StatusColors,
     ai_title: Option<&str>,
     copy_mode: Option<&CopyModeState>,
     frame: &mut Frame,
@@ -519,15 +573,17 @@ fn render_single_pane(
         String::new()
     };
 
-    let status_dot = if show_status_dot && !dismissed {
+    // Indicator: always visible (not just when focused) so activity is trackable across panes.
+    // Colored ● using config colors instead of emoji (emoji rendering is terminal-dependent).
+    let (dot_text, dot_color): (&str, Option<Color>) = if show_status_dot && !dismissed {
         match pane_status {
-            PaneStatus::Idle => "",
-            PaneStatus::Running => "\u{1f535} ",
-            PaneStatus::Done => "\u{1f7e2} ",
-            PaneStatus::Waiting => "\u{1f7e1} ",
+            PaneStatus::Idle    => ("", None),
+            PaneStatus::Running => ("\u{25cf} ", Some(status_colors.running)),
+            PaneStatus::Done    => ("\u{25cf} ", Some(status_colors.done)),
+            PaneStatus::Waiting => ("\u{25cf} ", Some(status_colors.waiting)),
         }
     } else {
-        ""
+        ("", None)
     };
 
     let id_part = if show_pane_numbers {
@@ -536,15 +592,8 @@ fn render_single_pane(
         String::new()
     };
     let copy_label = if in_copy_mode { "[COPY] " } else { "" };
-    let pane_title = if is_focused || in_copy_mode {
-        format!(" \u{25cf} {}{}{}{}{} ", copy_label, status_dot, label, id_part, claude_suffix)
-    } else if !status_dot.is_empty() {
-        format!(" {}{}{}{} ", status_dot, label, id_part, claude_suffix)
-    } else {
-        format!("   {}{}{} ", label, id_part, claude_suffix)
-    };
 
-    let title_style = if in_copy_mode {
+    let label_style = if in_copy_mode {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if is_focused && is_claude {
         Style::default().fg(ACCENT_CLAUDE).add_modifier(Modifier::BOLD)
@@ -552,6 +601,31 @@ fn render_single_pane(
         Style::default().fg(FOCUS_BORDER).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(TEXT_DIM)
+    };
+
+    // Build title as a Line so the indicator dot can have its own color.
+    // Focused panes show a focus marker (▶) separate from the status dot.
+    // Unfocused panes show the status dot in place of the first character.
+    let pane_title: Line = if is_focused || in_copy_mode {
+        let focus_marker = Span::styled(format!(" \u{25b6} {}", copy_label), label_style);
+        let rest = Span::styled(format!("{}{}{} ", label, id_part, claude_suffix), label_style);
+        if let Some(c) = dot_color {
+            Line::from(vec![
+                focus_marker,
+                Span::styled(dot_text, Style::default().fg(c)),
+                rest,
+            ])
+        } else {
+            Line::from(vec![focus_marker, rest])
+        }
+    } else if let Some(c) = dot_color {
+        Line::from(vec![
+            Span::styled(" ", label_style),
+            Span::styled(dot_text, Style::default().fg(c)),
+            Span::styled(format!("{}{}{} ", label, id_part, claude_suffix), label_style),
+        ])
+    } else {
+        Line::from(Span::styled(format!("   {}{}{} ", label, id_part, claude_suffix), label_style))
     };
 
     // Bottom title: scroll indicator OR claude stats
@@ -601,8 +675,8 @@ fn render_single_pane(
 
     let pane_bg = if show_status_bg && !dismissed {
         match pane_status {
-            PaneStatus::Done => Color::Rgb(13, 43, 13),
-            PaneStatus::Waiting => Color::Rgb(43, 26, 0),
+            PaneStatus::Done    => status_colors.bg_done,
+            PaneStatus::Waiting => status_colors.bg_waiting,
             _ => BG,
         }
     } else {
@@ -613,7 +687,7 @@ fn render_single_pane(
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(pane_title, title_style))
+        .title(pane_title)
         .title_bottom(bottom_title)
         .style(Style::default().bg(pane_bg));
 
@@ -1834,16 +1908,16 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
             .cloned()
             .unwrap_or_else(|| format!("Pane {}", pane_id));
 
-        let status_dot = if app.config.features.status_dot {
-            let pane_status = app.pane_status(pane_id);
-            match pane_status {
-                PaneStatus::Idle => "",
-                PaneStatus::Running => "\u{1f535} ",
-                PaneStatus::Done => "\u{1f7e2} ",
-                PaneStatus::Waiting => "\u{1f7e1} ",
+        let dot_info: Option<(&str, Color)> = if app.config.features.status_dot {
+            let sc = StatusColors::from_config(&app.config.status);
+            match app.pane_status(pane_id) {
+                PaneStatus::Idle    => None,
+                PaneStatus::Running => Some(("\u{25cf}", sc.running)),
+                PaneStatus::Done    => Some(("\u{25cf}", sc.done)),
+                PaneStatus::Waiting => Some(("\u{25cf}", sc.waiting)),
             }
         } else {
-            ""
+            None
         };
 
         let branch_name = app.ws().panes.get(&pane_id)
@@ -1866,10 +1940,13 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
         };
 
         let marker = if is_selected { " > " } else { "   " };
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(FOCUS_BORDER)),
-            Span::styled(format!("[{}] {}  {}{}", i, label, status_dot, branch_part), style),
-        ]));
+        let mut row_spans = vec![Span::styled(marker, Style::default().fg(FOCUS_BORDER))];
+        row_spans.push(Span::styled(format!("[{}] {}  ", i, label), style));
+        if let Some((dot, color)) = dot_info {
+            row_spans.push(Span::styled(format!("{} ", dot), Style::default().fg(color)));
+        }
+        row_spans.push(Span::styled(branch_part, style));
+        lines.push(Line::from(row_spans));
     }
 
     lines.push(Line::from(""));

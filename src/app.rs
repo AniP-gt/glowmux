@@ -3734,10 +3734,35 @@ impl App {
     }
 
     pub fn pane_status(&self, pane_id: usize) -> PaneStatus {
-        self.pane_states
+        let hook_status = self.pane_states
             .get(&pane_id)
             .map(|s| s.status)
-            .unwrap_or(PaneStatus::Idle)
+            .unwrap_or(PaneStatus::Idle);
+
+        let claude_state = self.claude_monitor.state(pane_id);
+
+        // JSONL-derived activity always wins for Running — hooks are too coarse
+        // to capture the sub-turn tool execution cycle.
+        if claude_state.is_working {
+            return PaneStatus::Running;
+        }
+
+        // Hook says Waiting (Notification) → trust it; JSONL has no Waiting signal.
+        if hook_status == PaneStatus::Waiting {
+            return PaneStatus::Waiting;
+        }
+
+        // JSONL has token data → Claude ran at least once this session.
+        if claude_state.total_tokens() > 0 {
+            return PaneStatus::Done;
+        }
+
+        // Hook-driven Done/Running as final fallback.
+        if hook_status != PaneStatus::Idle {
+            return hook_status;
+        }
+
+        PaneStatus::Idle
     }
 
     pub fn pane_state_dismissed(&self, pane_id: usize) -> bool {
