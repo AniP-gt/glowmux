@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -9,14 +9,21 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::app::AppEvent;
 
+enum WriterMsg {
+    Data(Vec<u8>),
+    Shutdown,
+}
+
 /// A terminal pane wrapping a PTY and vt100 parser.
 pub struct Pane {
     pub id: usize,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// Channel to the background writer thread — avoids blocking the main event loop.
+    writer_tx: SyncSender<WriterMsg>,
     pub parser: Arc<Mutex<vt100::Parser>>,
     child: Box<dyn Child + Send + Sync>,
     _reader_handle: thread::JoinHandle<()>,
+    _writer_handle: thread::JoinHandle<()>,
     last_rows: u16,
     last_cols: u16,
     pub exited: bool,
@@ -93,17 +100,56 @@ impl Pane {
         let title_clone = Arc::clone(&pane_title);
         let scrollback_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let scrollback_clone = Arc::clone(&scrollback_counter);
-        let reader_handle = thread::spawn(move || {
-            pty_reader_thread(reader, parser_clone, title_clone, scrollback_clone, id, event_tx);
-        });
+        let reader_handle = thread::Builder::new()
+            .name(format!("pty-reader-{}", id))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pty_reader_thread(reader, parser_clone, title_clone, scrollback_clone, id, event_tx);
+                }));
+                if let Err(e) = result {
+                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                        format!("pane {} reader thread panicked: {}", id, s)
+                    } else if let Some(s) = e.downcast_ref::<String>() {
+                        format!("pane {} reader thread panicked: {}", id, s)
+                    } else {
+                        format!("pane {} reader thread panicked (unknown payload)", id)
+                    };
+                    crate::log::write_log("PANIC", &msg);
+                }
+            })
+            .context("Failed to spawn reader thread")?;
+
+        // Background writer thread: drains the channel and writes to PTY.
+        // This prevents blocking the main event loop when the PTY buffer is full.
+        // Capacity of 64 messages gives burst headroom while still providing
+        // backpressure. WriterMsg::Shutdown causes the thread to exit cleanly.
+        let (writer_tx, writer_rx) = mpsc::sync_channel::<WriterMsg>(64);
+        let writer_handle = thread::Builder::new()
+            .name(format!("pty-writer-{}", id))
+            .spawn(move || {
+                let mut w = writer;
+                for msg in writer_rx {
+                    match msg {
+                        WriterMsg::Shutdown => break,
+                        WriterMsg::Data(chunk) => {
+                            if w.write_all(&chunk).is_err() || w.flush().is_err() {
+                                crate::log::write_log("WARN", &format!("pane {} writer: PTY write failed, stopping", id));
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .context("Failed to spawn writer thread")?;
 
         let mut pane = Self {
             id,
             master: pair.master,
-            writer,
+            writer_tx,
             parser,
             child,
             _reader_handle: reader_handle,
+            _writer_handle: writer_handle,
             last_rows: rows,
             last_cols: cols,
             exited: false,
@@ -137,12 +183,34 @@ impl Pane {
     }
 
     /// Write input bytes to the PTY (keyboard input from user).
+    ///
+    /// Sends to the background writer thread via a bounded channel so the main
+    /// event loop is never blocked by a full PTY buffer.  If the channel is
+    /// full (the child process has stopped reading input), we drop the chunk
+    /// and mark the pane exited so the UI can show it is dead.
     pub fn write_input(&mut self, data: &[u8]) -> Result<()> {
         if self.exited {
             return Ok(());
         }
-        if self.writer.write_all(data).is_err() || self.writer.flush().is_err() {
-            self.exited = true;
+        match self.writer_tx.try_send(WriterMsg::Data(data.to_vec())) {
+            Ok(_) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                // Channel is full: the child process is not consuming input fast enough.
+                // We drop this chunk to avoid blocking the main event loop.  A single
+                // dropped keystroke is visible to the user (character does not appear)
+                // which is a better outcome than the UI freezing entirely.
+                crate::log::write_log(
+                    "WARN",
+                    &format!("pane {} writer channel full — input dropped", self.id),
+                );
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                crate::log::write_log(
+                    "WARN",
+                    &format!("pane {} writer thread disconnected", self.id),
+                );
+                self.exited = true;
+            }
         }
         Ok(())
     }
@@ -253,6 +321,9 @@ impl Pane {
 
 impl Drop for Pane {
     fn drop(&mut self) {
+        // Signal the writer thread to exit before killing the child, so it
+        // flushes any buffered writes and releases the PTY fd cleanly.
+        let _ = self.writer_tx.try_send(WriterMsg::Shutdown);
         self.kill();
     }
 }
