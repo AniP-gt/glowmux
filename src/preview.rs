@@ -20,11 +20,32 @@ pub struct StyledSpan {
     pub fg: (u8, u8, u8),
 }
 
+/// Classification of a single line in a unified diff. Drives preview color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Header,
+    Hunk,
+    Added,
+    Removed,
+    Context,
+}
+
+/// One line of rendered diff output.
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub text: String,
+    pub kind: DiffLineKind,
+}
+
 /// File preview state.
 pub struct Preview {
     pub file_path: Option<PathBuf>,
     pub lines: Vec<String>,
     pub highlighted_lines: Vec<Vec<StyledSpan>>,
+    /// When non-empty, the preview renders these diff lines instead of
+    /// the regular syntax-highlighted text. Toggled with `d` in filetree mode.
+    pub diff_lines: Vec<DiffLine>,
+    pub diff_mode: bool,
     /// Vertical scroll position (line index of the top visible line).
     pub scroll_offset: usize,
     /// Horizontal scroll position (char count dropped from the left of
@@ -44,6 +65,8 @@ impl Preview {
             file_path: None,
             lines: Vec::new(),
             highlighted_lines: Vec::new(),
+            diff_lines: Vec::new(),
+            diff_mode: false,
             scroll_offset: 0,
             h_scroll_offset: 0,
             is_binary: false,
@@ -69,6 +92,8 @@ impl Preview {
         self.h_scroll_offset = 0;
         self.lines.clear();
         self.highlighted_lines.clear();
+        self.diff_lines.clear();
+        self.diff_mode = false;
         self.is_binary = false;
         self.image_protocol = None;
 
@@ -193,10 +218,38 @@ impl Preview {
         self.file_path = None;
         self.lines.clear();
         self.highlighted_lines.clear();
+        self.diff_lines.clear();
+        self.diff_mode = false;
         self.scroll_offset = 0;
         self.h_scroll_offset = 0;
         self.is_binary = false;
         self.image_protocol = None;
+    }
+
+    /// Toggle diff preview mode. Loads the diff for the currently-previewed
+    /// file the first time it's enabled (or after the file has changed).
+    /// Returns true if diff content was found, false if there's no diff to show.
+    pub fn toggle_diff(&mut self) -> bool {
+        let Some(path) = self.file_path.clone() else {
+            return false;
+        };
+        if self.diff_mode {
+            // Switching off — keep cached lines so re-toggling is cheap.
+            self.diff_mode = false;
+            self.scroll_offset = 0;
+            return true;
+        }
+        if self.diff_lines.is_empty() {
+            if let Some(lines) = load_diff_for(&path) {
+                self.diff_lines = lines;
+            }
+        }
+        if self.diff_lines.is_empty() {
+            return false;
+        }
+        self.diff_mode = true;
+        self.scroll_offset = 0;
+        true
     }
 
     /// Check if preview is active.
@@ -220,7 +273,8 @@ impl Preview {
 
     /// Scroll down by amount.
     pub fn scroll_down(&mut self, amount: usize) {
-        let max_offset = self.lines.len().saturating_sub(1);
+        let total = if self.diff_mode { self.diff_lines.len() } else { self.lines.len() };
+        let max_offset = total.saturating_sub(1);
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
     }
 
@@ -234,14 +288,71 @@ impl Preview {
     /// line minus 10 chars — keeps the user from scrolling off into
     /// blank territory).
     pub fn scroll_right(&mut self, amount: usize) {
-        let widest = self
-            .lines
-            .iter()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(0);
+        let widest = if self.diff_mode {
+            self.diff_lines
+                .iter()
+                .map(|l| l.text.chars().count())
+                .max()
+                .unwrap_or(0)
+        } else {
+            self.lines
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0)
+        };
         let max_h = widest.saturating_sub(10);
         self.h_scroll_offset = (self.h_scroll_offset + amount).min(max_h);
+    }
+}
+
+/// Run `git diff HEAD -- {path}` and parse the output into colored diff lines.
+/// Returns None when the file has no diff, the path is not under a git repo,
+/// or the command fails — callers should fall back to normal preview.
+pub fn load_diff_for(path: &Path) -> Option<Vec<DiffLine>> {
+    let path_str = path.to_string_lossy();
+    let cwd = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let output = std::process::Command::new("git")
+        .args(["diff", "HEAD", "--", path_str.as_ref()])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<DiffLine> = Vec::with_capacity(MAX_PREVIEW_LINES);
+    for raw in text.lines().take(MAX_PREVIEW_LINES) {
+        let kind = classify_diff_line(raw);
+        lines.push(DiffLine {
+            text: raw.to_string(),
+            kind,
+        });
+    }
+    Some(lines)
+}
+
+fn classify_diff_line(line: &str) -> DiffLineKind {
+    if line.starts_with("@@") {
+        DiffLineKind::Hunk
+    } else if line.starts_with("+++") || line.starts_with("---")
+        || line.starts_with("diff ") || line.starts_with("index ")
+        || line.starts_with("new file") || line.starts_with("deleted file")
+        || line.starts_with("rename ") || line.starts_with("similarity ")
+    {
+        DiffLineKind::Header
+    } else if line.starts_with('+') {
+        DiffLineKind::Added
+    } else if line.starts_with('-') {
+        DiffLineKind::Removed
+    } else {
+        DiffLineKind::Context
     }
 }
 
@@ -324,5 +435,17 @@ mod tests {
         // Highlighted lines should have colored spans
         let first = &preview.highlighted_lines[0];
         assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn test_classify_diff_line() {
+        assert_eq!(classify_diff_line("@@ -1,5 +1,7 @@"), DiffLineKind::Hunk);
+        assert_eq!(classify_diff_line("+++ b/file.rs"), DiffLineKind::Header);
+        assert_eq!(classify_diff_line("--- a/file.rs"), DiffLineKind::Header);
+        assert_eq!(classify_diff_line("diff --git a/x b/x"), DiffLineKind::Header);
+        assert_eq!(classify_diff_line("+added line"), DiffLineKind::Added);
+        assert_eq!(classify_diff_line("-removed line"), DiffLineKind::Removed);
+        assert_eq!(classify_diff_line(" context line"), DiffLineKind::Context);
+        assert_eq!(classify_diff_line(""), DiffLineKind::Context);
     }
 }
