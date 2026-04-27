@@ -4,17 +4,17 @@ const https = require('https');
 const crypto = require('crypto');
 
 const VERSION = require('../package.json').version;
-const REPO = 'Shin-sibainu/ccmux';
+const REPO = 'AniP-gt/glowmux';
 const MAX_REDIRECTS = 5;
 
 function getPlatformBinary() {
   const platform = process.platform;
   const arch = process.arch;
 
-  if (platform === 'win32' && arch === 'x64') return 'ccmux-windows-x64.exe';
-  if (platform === 'darwin' && arch === 'arm64') return 'ccmux-macos-arm64';
-  if (platform === 'darwin' && arch === 'x64') return 'ccmux-macos-x64';
-  if (platform === 'linux' && arch === 'x64') return 'ccmux-linux-x64';
+  if (platform === 'win32' && arch === 'x64') return 'glowmux-windows-x64.exe';
+  if (platform === 'darwin' && arch === 'arm64') return 'glowmux-macos-arm64';
+  if (platform === 'darwin' && arch === 'x64') return 'glowmux-macos-x64';
+  if (platform === 'linux' && arch === 'x64') return 'glowmux-linux-x64';
 
   console.error(`Unsupported platform: ${platform}-${arch}`);
   process.exit(1);
@@ -26,7 +26,7 @@ function download(url, dest, redirects = 0) {
       reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
       return;
     }
-    https.get(url, { headers: { 'User-Agent': 'ccmux-installer' } }, (res) => {
+    https.get(url, { headers: { 'User-Agent': 'glowmux-installer' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         download(res.headers.location, dest, redirects + 1).then(resolve, reject);
         return;
@@ -51,7 +51,7 @@ function fetchText(url, redirects = 0) {
       reject(new Error(`Too many redirects (max ${MAX_REDIRECTS})`));
       return;
     }
-    https.get(url, { headers: { 'User-Agent': 'ccmux-installer' } }, (res) => {
+    https.get(url, { headers: { 'User-Agent': 'glowmux-installer' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         fetchText(res.headers.location, redirects + 1).then(resolve, reject);
         return;
@@ -83,9 +83,9 @@ async function main() {
   const url = `${baseUrl}/${binaryName}`;
   const binDir = path.join(__dirname, '..', 'bin');
   const isWindows = process.platform === 'win32';
-  const dest = path.join(binDir, isWindows ? 'ccmux.exe' : 'ccmux');
+  const dest = path.join(binDir, isWindows ? 'glowmux.exe' : 'glowmux');
 
-  console.log(`Downloading ccmux v${VERSION} for ${process.platform}-${process.arch}...`);
+  console.log(`Downloading glowmux v${VERSION} for ${process.platform}-${process.arch}...`);
 
   try {
     await download(url, dest);
@@ -124,20 +124,20 @@ async function main() {
     const DIM = '\x1b[38;2;110;118;129m';
     const RESET = '\x1b[0m';
     console.log('');
-    console.log(`${BLUE} ██████╗ ██████╗███╗   ███╗██╗   ██╗██╗  ██╗${RESET}`);
-    console.log(`${BLUE}██╔════╝██╔════╝████╗ ████║██║   ██║╚██╗██╔╝${RESET}`);
-    console.log(`${BLUE}██║     ██║     ██╔████╔██║██║   ██║ ╚███╔╝${RESET}`);
-    console.log(`${BLUE}██║     ██║     ██║╚██╔╝██║██║   ██║ ██╔██╗${RESET}`);
-    console.log(`${BLUE}╚██████╗╚██████╗██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗${RESET}`);
-    console.log(`${BLUE} ╚═════╝ ╚═════╝╚═╝     ╚═╝ ╚═════╝╚═╝  ╚═╝${RESET}`);
+    console.log(`${BLUE} ██████╗ ██╗      ██████╗ ██╗    ██╗███╗   ███╗██╗   ██╗██╗  ██╗${RESET}`);
+    console.log(`${BLUE}██╔════╝ ██║     ██╔═══██╗██║    ██║████╗ ████║██║   ██║╚██╗██╔╝${RESET}`);
+    console.log(`${BLUE}██║  ███╗██║     ██║   ██║██║ █╗ ██║██╔████╔██║██║   ██║ ╚███╔╝ ${RESET}`);
+    console.log(`${BLUE}██║   ██║██║     ██║   ██║██║███╗██║██║╚██╔╝██║██║   ██║ ██╔██╗ ${RESET}`);
+    console.log(`${BLUE}╚██████╔╝███████╗╚██████╔╝╚███╔███╔╝██║ ╚═╝ ██║╚██████╔╝██╔╝ ██╗${RESET}`);
+    console.log(`${BLUE} ╚═════╝ ╚══════╝ ╚═════╝  ╚══╝╚══╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝${RESET}`);
     console.log('');
     console.log(`${DIM}  Claude Code Multiplexer v${VERSION}${RESET}`);
-    console.log(`${DIM}  Run 'ccmux' to start.${RESET}`);
+    console.log(`${DIM}  Run 'glowmux' to start.${RESET}`);
     console.log('');
   } catch (err) {
-    console.error(`Failed to download ccmux: ${err.message}`);
+    console.error(`Failed to download glowmux: ${err.message}`);
     console.error(`URL: ${url}`);
-    console.error('You can download manually from: https://github.com/Shin-sibainu/ccmux/releases');
+    console.error('You can download manually from: https://github.com/AniP-gt/glowmux/releases');
     process.exit(1);
   }
 }

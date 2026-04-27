@@ -484,10 +484,15 @@ fn render_single_pane(
     } else {
         "shell".to_string()
     };
-    let label = if let Some(ref branch) = pane.branch_name {
-        format!("{} \u{2387}{}", base_label, branch)
-    } else {
-        base_label
+    // Spec v5: append " ⌇ {branch}" to the pane title when a branch is bound.
+    // Truncate the base label first so the branch always fits within a sensible
+    // width budget — otherwise long AI titles can push the branch off-screen.
+    let label = match pane.branch_name.as_deref() {
+        Some(branch) if !branch.is_empty() => {
+            let truncated_base = truncate_to_width(&base_label, 24);
+            format!("{} \u{2307} {}", truncated_base, branch)
+        }
+        _ => base_label,
     };
 
     let claude_suffix = if is_claude {
@@ -792,10 +797,19 @@ fn render_preview(app: &mut App, frame: &mut Frame, area: Rect) {
     // Extract values we need before any mutable borrow.
     let is_focused = app.ws().focus_target == FocusTarget::Preview;
     let filename = app.ws().preview.filename();
-    let title = format!(" {} ", filename);
+    let diff_mode = app.ws().preview.diff_mode;
+    let title = if diff_mode {
+        format!(" {} [diff] ", filename)
+    } else {
+        format!(" {} ", filename)
+    };
     let is_image = app.ws().preview.is_image();
     let is_binary = app.ws().preview.is_binary;
-    let line_count = app.ws().preview.lines.len();
+    let line_count = if diff_mode {
+        app.ws().preview.diff_lines.len()
+    } else {
+        app.ws().preview.lines.len()
+    };
     let scroll_pos = app.ws().preview.scroll_offset;
 
     let is_border_active = matches!(
@@ -865,6 +879,34 @@ fn render_preview(app: &mut App, frame: &mut Frame, area: Rect) {
     let scroll = ws.preview.scroll_offset;
     let h_scroll = ws.preview.h_scroll_offset;
     let has_highlights = !ws.preview.highlighted_lines.is_empty();
+
+    // Diff mode: render colored unified-diff lines instead of syntax
+    // highlight. Selection overlay below still applies because lines
+    // are addressable by index just like the normal preview.
+    if ws.preview.diff_mode && !ws.preview.diff_lines.is_empty() {
+        for i in 0..visible_height {
+            let line_idx = scroll + i;
+            if line_idx >= ws.preview.diff_lines.len() {
+                break;
+            }
+            let y = inner.y + i as u16;
+            let dl = &ws.preview.diff_lines[line_idx];
+            let max_content = inner.width as usize;
+            let dropped: String = dl.text.chars().skip(h_scroll).collect();
+            let content = truncate_to_width(&dropped, max_content);
+            let style = match dl.kind {
+                crate::preview::DiffLineKind::Added => Style::default().fg(ACCENT_GREEN),
+                crate::preview::DiffLineKind::Removed => Style::default().fg(Color::Rgb(0xf8, 0x70, 0x70)),
+                crate::preview::DiffLineKind::Hunk => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                crate::preview::DiffLineKind::Header => Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+                crate::preview::DiffLineKind::Context => Style::default().fg(TEXT),
+            };
+            let paragraph = Paragraph::new(Line::from(Span::styled(content, style)))
+                .style(Style::default().bg(PANEL_BG));
+            frame.render_widget(paragraph, Rect::new(inner.x, y, inner.width, 1));
+        }
+        return;
+    }
 
     for i in 0..visible_height {
         let line_idx = scroll + i;
@@ -1245,8 +1287,39 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
 }
 
 fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
-    let dialog_width = 40u16;
-    let dialog_height = (FEATURES.len() as u16) + 6;
+    // Build the keybinding cheatsheet rows that are appended below the toggle list.
+    let kb = &app.config.keybindings;
+    let cheatsheet: &[(&str, &str)] = &[
+        (kb.zoom.as_str(), "zoom"),
+        (kb.layout_cycle.as_str(), "layout cycle"),
+        (kb.layout_picker.as_str(), "layout picker"),
+        (kb.pane_left.as_str(), "pane left"),
+        (kb.pane_right.as_str(), "pane right"),
+        (kb.pane_up.as_str(), "pane up"),
+        (kb.pane_down.as_str(), "pane down"),
+        (kb.pane_next.as_str(), "pane next"),
+        (kb.pane_prev.as_str(), "pane prev"),
+        (kb.pane_create.as_str(), "pane create"),
+        (kb.pane_close.as_str(), "pane close"),
+        (kb.split_vertical.as_str(), "split vertical"),
+        (kb.split_horizontal.as_str(), "split horizontal"),
+        (kb.tab_new.as_str(), "tab new"),
+        (kb.tab_rename.as_str(), "tab rename"),
+        (kb.tab_next.as_str(), "tab next"),
+        (kb.tab_prev.as_str(), "tab prev"),
+        (kb.file_tree.as_str(), "file tree"),
+        (kb.preview_swap.as_str(), "preview swap"),
+        (kb.feature_toggle.as_str(), "feature toggle"),
+        (kb.clipboard_copy.as_str(), "clipboard copy"),
+        (kb.ai_title_toggle.as_str(), "ai title toggle"),
+        (kb.quit.as_str(), "quit"),
+    ];
+
+    // Sized to fit features + divider + cheatsheet + 3 lines of chrome (title,
+    // separator, hints). Capped to area height so it never overflows.
+    let dialog_width = 56u16;
+    let content_lines = (FEATURES.len() + cheatsheet.len() + 4) as u16;
+    let dialog_height = content_lines.saturating_add(3).min(area.height);
 
     let x = area.x + area.width.saturating_sub(dialog_width) / 2;
     let y = area.y + area.height.saturating_sub(dialog_height) / 2;
@@ -1254,7 +1327,7 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
         x,
         y,
         dialog_width.min(area.width),
-        dialog_height.min(area.height),
+        dialog_height,
     );
 
     frame.render_widget(Clear, dialog_rect);
@@ -1278,7 +1351,6 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
     );
 
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(""));
 
     for (i, &(key, desc)) in FEATURES.iter().enumerate() {
         let enabled = app.feature_toggle.pending.get_by_key(key);
@@ -1302,13 +1374,36 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
         ]));
     }
 
+    // Divider + Keybindings cheatsheet
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k: move  Space: toggle  q: apply  Esc: cancel",
+        " Keybindings",
+        Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD),
+    )));
+    for (binding, action) in cheatsheet {
+        let display = keybinding::keybinding_display(binding);
+        // 14-col left column keeps the action descriptions vertically aligned.
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {:<14}", display), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(action.to_string(), Style::default().fg(TEXT_DIM)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k: move  Space: toggle  Enter/q: apply  Esc: cancel",
         Style::default().fg(TEXT_DIM),
     )));
 
-    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    // Keep the selected feature row centered when the content overflows the
+    // dialog. Without this scroll the list clips on small terminals.
+    let visible_height = inner.height as usize;
+    let scroll_top = selected.saturating_sub(visible_height / 2);
+    let scroll_top = scroll_top.min(lines.len().saturating_sub(visible_height));
+
+    let para = Paragraph::new(lines)
+        .style(Style::default().bg(PANEL_BG))
+        .scroll((scroll_top as u16, 0));
     frame.render_widget(para, inner);
 }
 
@@ -1322,7 +1417,7 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
 
 fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateDialog) {
     let popup_w = 50u16.min(area.width.saturating_sub(4));
-    let popup_h = 10u16.min(area.height.saturating_sub(4));
+    let popup_h = 11u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(x, y, popup_w, popup_h);
@@ -1348,12 +1443,19 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
     );
 
+    let base_style = if dialog.focused_field == PaneCreateField::BaseBranch { hl } else { normal };
+    let base_text = format!("Base:   [{}]", dialog.base_branch);
+    frame.render_widget(
+        Paragraph::new(base_text).style(base_style),
+        Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1),
+    );
+
     let wt_style = if dialog.focused_field == PaneCreateField::WorktreeToggle { hl } else { normal };
     let wt_check = if dialog.worktree_enabled { "x" } else { " " };
     let wt_text = format!("Worktree: [{}] create", wt_check);
     frame.render_widget(
         Paragraph::new(wt_text).style(wt_style),
-        Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1),
+        Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
     );
 
     let agent_style = if dialog.focused_field == PaneCreateField::AgentField { hl } else { normal };
@@ -1363,7 +1465,7 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
     );
     frame.render_widget(
         Paragraph::new(agent_text).style(agent_style),
-        Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
+        Rect::new(inner.x + 1, inner.y + 3, inner.width.saturating_sub(2), 1),
     );
 
     let ai_focused = dialog.focused_field == PaneCreateField::AiGenerate;
@@ -1389,7 +1491,7 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         Style::default().fg(Color::Red)
     };
 
-    let buttons_y = inner.y + 4;
+    let buttons_y = inner.y + 5;
     frame.render_widget(
         Paragraph::new(ai_label).style(ai_style),
         Rect::new(inner.x + 1, buttons_y, 15, 1),

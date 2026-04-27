@@ -10,5 +10,5 @@ image copy 2.png
 /lp-*.png
 
 # Platform-specific binaries fetched by npm postinstall
-/npm/bin/ccmux
-/npm/bin/ccmux.exe
+/npm/bin/glowmux
+/npm/bin/glowmux.exe

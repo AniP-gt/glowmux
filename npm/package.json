@@ -1,9 +1,9 @@
 {
-  "name": "ccmux-cli",
+  "name": "glowmux-cli",
   "version": "0.6.1",
   "description": "Claude Code Multiplexer — manage multiple Claude Code instances in TUI split panes",
   "bin": {
-    "ccmux": "bin/cli.js"
+    "glowmux": "bin/cli.js"
   },
   "scripts": {
     "postinstall": "node scripts/install.js"
@@ -18,13 +18,13 @@
     "split",
     "tmux"
   ],
-  "author": "Shin-sibainu",
+  "author": "AniP-gt",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Shin-sibainu/ccmux"
+    "url": "https://github.com/AniP-gt/glowmux"
   },
-  "homepage": "https://shin-sibainu.github.io/ccmux/",
+  "homepage": "https://github.com/AniP-gt/glowmux",
   "os": [
     "win32",
     "darwin",

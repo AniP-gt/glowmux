@@ -1,10 +1,10 @@
-# ccmux
+# glowmux
 
 Claude Code Multiplexer — manage multiple Claude Code instances in TUI split panes.
 
 A lightweight terminal multiplexer built specifically for running multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions side-by-side.
 
-![ccmux screenshot](screenshot.png)
+![glowmux screenshot](screenshot.png)
 
 ## Features
 
@@ -25,31 +25,31 @@ A lightweight terminal multiplexer built specifically for running multiple [Clau
 ### Via npm (recommended)
 
 ```bash
-npm install -g ccmux-cli
+npm install -g glowmux-cli
 ```
 
 ### Download binary
 
-Download the latest binary from [Releases](https://github.com/Shin-sibainu/ccmux/releases):
+Download the latest binary from [Releases](https://github.com/AniP-gt/glowmux/releases):
 
 | Platform | File |
 |----------|------|
-| Windows (x64) | `ccmux-windows-x64.exe` |
-| macOS (Apple Silicon) | `ccmux-macos-arm64` |
-| macOS (Intel) | `ccmux-macos-x64` |
-| Linux (x64) | `ccmux-linux-x64` |
+| Windows (x64) | `glowmux-windows-x64.exe` |
+| macOS (Apple Silicon) | `glowmux-macos-arm64` |
+| macOS (Intel) | `glowmux-macos-x64` |
+| Linux (x64) | `glowmux-linux-x64` |
 
 > **Windows:** Microsoft Defender SmartScreen may show a warning because the binary is not code-signed. Click "More info" → "Run anyway" to proceed. This is normal for unsigned open-source software.
 
-> **macOS/Linux:** After downloading, make the binary executable: `chmod +x ccmux-*`
+> **macOS/Linux:** After downloading, make the binary executable: `chmod +x glowmux-*`
 
 ### From source
 
 ```bash
-git clone https://github.com/Shin-sibainu/ccmux.git
-cd ccmux
+git clone https://github.com/AniP-gt/glowmux.git
+cd glowmux
 cargo build --release
-# Binary at target/release/ccmux (or ccmux.exe on Windows)
+# Binary at target/release/glowmux (or glowmux.exe on Windows)
 ```
 
 Requires [Rust](https://rustup.rs/) toolchain.
@@ -57,7 +57,7 @@ Requires [Rust](https://rustup.rs/) toolchain.
 ## Usage
 
 ```bash
-ccmux
+glowmux
 ```
 
 Launch from any directory. The file tree shows the current working directory.
@@ -139,6 +139,8 @@ src/
 ## Learn Claude Code
 
 New to Claude Code? Check out [Claude Code Academy](https://claude-code-academy.dev) for tutorials and guides.
+
+> Inspired by [ccmux](https://github.com/Shin-sibainu/ccmux).
 
 ## License
 

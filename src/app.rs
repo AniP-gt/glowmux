@@ -66,7 +66,18 @@ pub const FEATURES: &[(&str, &str)] = &[
     ("status_dot", "Status Dot"),
     ("status_bg_color", "BG Color"),
     ("status_bar", "Status Bar"),
+    ("worktree", "Worktree"),
+    ("worktree_ai_name", "Worktree AI Name"),
+    ("file_tree", "File Tree"),
+    ("file_preview", "File Preview"),
+    ("diff_preview", "Diff Preview"),
+    ("cd_tracking", "CD Tracking"),
     ("ai_title", "AI Title"),
+    ("responsive_layout", "Responsive Layout"),
+    ("session_persist", "Session Persist"),
+    ("context_copy", "Context Copy"),
+    ("layout_picker", "Layout Picker"),
+    ("startup_panes", "Startup Panes"),
     ("zoom", "Zoom"),
 ];
 
@@ -137,6 +148,7 @@ pub enum Direction {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaneCreateField {
     BranchName,
+    BaseBranch,
     WorktreeToggle,
     AgentField,
     AiGenerate,
@@ -148,6 +160,7 @@ pub enum PaneCreateField {
 pub struct PaneCreateDialog {
     pub visible: bool,
     pub branch_name: String,
+    pub base_branch: String,
     pub worktree_enabled: bool,
     pub agent: String,
     pub generating_name: bool,
@@ -160,6 +173,7 @@ impl Default for PaneCreateDialog {
         Self {
             visible: false,
             branch_name: String::new(),
+            base_branch: String::new(),
             worktree_enabled: false,
             agent: String::new(),
             generating_name: false,
@@ -729,7 +743,11 @@ impl App {
             }
         }
 
-        if !session_restored && app.config.startup.enabled && !app.config.startup.panes.is_empty() {
+        if !session_restored
+            && app.config.features.startup_panes
+            && app.config.startup.enabled
+            && !app.config.startup.panes.is_empty()
+        {
             app.apply_startup_panes(pane_rows, pane_cols)?;
         }
 
@@ -925,7 +943,10 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else if self.key_matches(key, &self.config.keybindings.quit) {
+                } else if crate::keybinding::parse_keybinding(&self.config.keybindings.quit)
+                    .map(|(_, code)| key.code == code)
+                    .unwrap_or(false)
+                {
                     self.should_quit = true;
                     return Ok(true);
                 } else if crate::keybinding::parse_keybinding(&self.config.keybindings.layout_cycle)
@@ -1215,6 +1236,7 @@ impl App {
                 worktree_enabled: self.config.worktree.auto_create,
                 agent: self.config.startup.default_agent.clone(),
                 focused_field: PaneCreateField::BranchName,
+                base_branch: self.config.worktree.base_branch.clone(),
                 ..Default::default()
             };
             self.dirty = true;
@@ -1304,6 +1326,20 @@ impl App {
             }
             KeyCode::Char('.') => {
                 self.ws_mut().file_tree.toggle_hidden();
+                Ok(true)
+            }
+            KeyCode::Char('d') => {
+                // Diff preview toggle. Only meaningful when both the feature
+                // is enabled in config AND a file is currently loaded.
+                if self.config.features.diff_preview {
+                    let had_diff = self.ws_mut().preview.toggle_diff();
+                    if !had_diff {
+                        self.status_flash = Some((
+                            "no diff for selected file".to_string(),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
                 Ok(true)
             }
             KeyCode::Esc => {
@@ -1954,7 +1990,8 @@ impl App {
             }
             KeyCode::Tab => {
                 self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
-                    PaneCreateField::BranchName => PaneCreateField::WorktreeToggle,
+                    PaneCreateField::BranchName => PaneCreateField::BaseBranch,
+                    PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
                     PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
                     PaneCreateField::AgentField => PaneCreateField::AiGenerate,
                     PaneCreateField::AiGenerate => PaneCreateField::OkButton,
@@ -1966,7 +2003,8 @@ impl App {
             KeyCode::BackTab => {
                 self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
                     PaneCreateField::BranchName => PaneCreateField::CancelButton,
-                    PaneCreateField::WorktreeToggle => PaneCreateField::BranchName,
+                    PaneCreateField::BaseBranch => PaneCreateField::BranchName,
+                    PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
                     PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
                     PaneCreateField::AiGenerate => PaneCreateField::AgentField,
                     PaneCreateField::OkButton => PaneCreateField::AiGenerate,
@@ -1991,13 +2029,14 @@ impl App {
                             self.start_branch_name_generation();
                         }
                     }
-                    PaneCreateField::OkButton | PaneCreateField::BranchName => {
+                    PaneCreateField::OkButton | PaneCreateField::BranchName | PaneCreateField::BaseBranch => {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
                             let agent = self.pane_create_dialog.agent.clone();
+                            let base_branch = self.pane_create_dialog.base_branch.clone();
                             self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(branch, worktree, agent)?;
+                            self.create_pane_from_dialog(branch, worktree, agent, base_branch)?;
                             self.dirty = true;
                         }
                     }
@@ -2008,6 +2047,10 @@ impl App {
                 match self.pane_create_dialog.focused_field {
                     PaneCreateField::BranchName => {
                         self.pane_create_dialog.branch_name.pop();
+                        self.dirty = true;
+                    }
+                    PaneCreateField::BaseBranch => {
+                        self.pane_create_dialog.base_branch.pop();
                         self.dirty = true;
                     }
                     PaneCreateField::AgentField => {
@@ -2022,6 +2065,12 @@ impl App {
                     PaneCreateField::BranchName => {
                         if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
                             self.pane_create_dialog.branch_name.push(c);
+                            self.dirty = true;
+                        }
+                    }
+                    PaneCreateField::BaseBranch => {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' || c == '.' {
+                            self.pane_create_dialog.base_branch.push(c);
                             self.dirty = true;
                         }
                     }
@@ -2176,8 +2225,19 @@ impl App {
     }
 
     fn start_branch_name_generation(&mut self) {
+        // Respect the feature gate: worktree_ai_name OR ai.worktree_name.enabled.
+        // Either flag turns the AI Generate button into a real call.
+        let feature_on = self.config.features.worktree_ai_name
+            || self.config.ai.worktree_name.enabled;
+        if !feature_on {
+            self.pane_create_dialog.error_msg =
+                Some("AI worktree name disabled (features.worktree_ai_name)".to_string());
+            self.dirty = true;
+            return;
+        }
         if let Some(handle) = &self.tokio_handle {
             self.pane_create_dialog.generating_name = true;
+            self.pane_create_dialog.error_msg = None;
             let tx = self.event_tx.clone();
             let config = self.config.ai.clone();
             let context = self.pane_create_dialog.branch_name.clone();
@@ -2189,7 +2249,13 @@ impl App {
         }
     }
 
-    fn create_pane_from_dialog(&mut self, branch_name: String, worktree_enabled: bool, agent: String) -> Result<()> {
+    fn create_pane_from_dialog(
+        &mut self,
+        branch_name: String,
+        worktree_enabled: bool,
+        agent: String,
+        base_branch: String,
+    ) -> Result<()> {
         let (cols, rows) = self.last_term_size;
         let pane_id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
@@ -2220,11 +2286,17 @@ impl App {
                 let tx = self.event_tx.clone();
                 let repo_root = cwd;
                 let branch = branch_name;
+                let opts = crate::worktree::WorktreeCreateOptions {
+                    prefer_gwq: self.config.worktree.prefer_gwq,
+                    worktree_dir: self.config.worktree.worktree_dir.clone(),
+                    base_branch,
+                };
                 handle.spawn(async move {
                     let branch_clone = branch.clone();
+                    let opts_clone = opts.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         let mgr = crate::worktree::WorktreeManager::new();
-                        mgr.create(&repo_root, &branch_clone)
+                        mgr.create_with_options(&repo_root, &branch_clone, &opts_clone)
                     }).await;
                     match result {
                         Ok(Ok(path)) => {
@@ -2342,7 +2414,9 @@ impl App {
 
         if let Some(first) = pane_configs.first() {
             if !first.command.is_empty() {
-                let first_id = self.workspaces[0].layout.collect_pane_ids()[0];
+                let Some(&first_id) = self.workspaces[0].layout.collect_pane_ids().first() else {
+                    return Ok(());
+                };
                 let cmd = format!("{}\r", first.command);
                 if let Some(p) = self.ws_mut().panes.get_mut(&first_id) {
                     let _ = p.write_input(cmd.as_bytes());
@@ -3557,6 +3631,10 @@ impl App {
                     self.pane_create_dialog.generating_name = false;
                     if !branch.is_empty() {
                         self.pane_create_dialog.branch_name = branch;
+                        self.pane_create_dialog.error_msg = None;
+                    } else {
+                        self.pane_create_dialog.error_msg =
+                            Some("AI generation failed or timed out".to_string());
                     }
                 }
                 AppEvent::WorktreeCreated { pane_id, cwd, branch_name: _ } => {

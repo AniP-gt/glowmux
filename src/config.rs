@@ -30,6 +30,18 @@ pub struct FeaturesConfig {
     pub status_bg_color: bool,
     pub status_bar: bool,
     pub zoom: bool,
+    // Spec v5 additions
+    pub worktree: bool,
+    pub worktree_ai_name: bool,
+    pub file_tree: bool,
+    pub file_preview: bool,
+    pub diff_preview: bool,
+    pub cd_tracking: bool,
+    pub responsive_layout: bool,
+    pub session_persist: bool,
+    pub context_copy: bool,
+    pub layout_picker: bool,
+    pub startup_panes: bool,
 }
 
 impl Default for FeaturesConfig {
@@ -44,6 +56,17 @@ impl Default for FeaturesConfig {
             status_bg_color: true,
             status_bar: true,
             zoom: true,
+            worktree: true,
+            worktree_ai_name: false,
+            file_tree: true,
+            file_preview: true,
+            diff_preview: false,
+            cd_tracking: true,
+            responsive_layout: true,
+            session_persist: false,
+            context_copy: true,
+            layout_picker: true,
+            startup_panes: true,
         }
     }
 }
@@ -56,6 +79,17 @@ impl FeaturesConfig {
             "status_bar" => self.status_bar,
             "ai_title" => self.ai_title,
             "zoom" => self.zoom,
+            "worktree" => self.worktree,
+            "worktree_ai_name" => self.worktree_ai_name,
+            "file_tree" => self.file_tree,
+            "file_preview" => self.file_preview,
+            "diff_preview" => self.diff_preview,
+            "cd_tracking" => self.cd_tracking,
+            "responsive_layout" => self.responsive_layout,
+            "session_persist" => self.session_persist,
+            "context_copy" => self.context_copy,
+            "layout_picker" => self.layout_picker,
+            "startup_panes" => self.startup_panes,
             _ => false,
         }
     }
@@ -67,6 +101,17 @@ impl FeaturesConfig {
             "status_bar" => self.status_bar = value,
             "ai_title" => self.ai_title = value,
             "zoom" => self.zoom = value,
+            "worktree" => self.worktree = value,
+            "worktree_ai_name" => self.worktree_ai_name = value,
+            "file_tree" => self.file_tree = value,
+            "file_preview" => self.file_preview = value,
+            "diff_preview" => self.diff_preview = value,
+            "cd_tracking" => self.cd_tracking = value,
+            "responsive_layout" => self.responsive_layout = value,
+            "session_persist" => self.session_persist = value,
+            "context_copy" => self.context_copy = value,
+            "layout_picker" => self.layout_picker = value,
+            "startup_panes" => self.startup_panes = value,
             _ => {}
         }
     }
@@ -189,6 +234,15 @@ pub struct WorktreeConfig {
     pub auto_create: bool,
     /// Default branch name for merge detection (e.g. "main", "master")
     pub main_branch: String,
+    // Spec v5 additions
+    /// Prefer the `gwq` CLI when available; falls back to `git worktree`.
+    pub prefer_gwq: bool,
+    /// Base directory for gwq-managed worktrees (e.g. "~/ghq").
+    pub gwq_basedir: String,
+    /// Subdirectory under the repo root for git-worktree-managed worktrees.
+    pub worktree_dir: String,
+    /// Default base branch for new worktrees (used by the pane create dialog).
+    pub base_branch: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -198,6 +252,13 @@ pub struct SessionConfig {
     pub auto_save: bool,
     pub save_interval: u64,
     pub restore_on_start: bool,
+    // Spec v5 additions
+    /// When true, restoring a session also re-launches the `claude` CLI in
+    /// each restored pane that was running it.
+    pub restore_claude: bool,
+    /// Override path for the session save file. Empty falls back to the
+    /// default `dirs::config_dir()/glowmux/session.json` location.
+    pub save_path: String,
 }
 
 /// Key binding configuration. All fields are wired to runtime behavior.
@@ -388,6 +449,10 @@ impl Default for WorktreeConfig {
             close_worktree: "ask".to_string(),
             auto_create: false,
             main_branch: "main".to_string(),
+            prefer_gwq: false,
+            gwq_basedir: "~/ghq".to_string(),
+            worktree_dir: ".glowmux".to_string(),
+            base_branch: "main".to_string(),
         }
     }
 }
@@ -399,6 +464,8 @@ impl Default for SessionConfig {
             auto_save: true,
             save_interval: 30,
             restore_on_start: true,
+            restore_claude: false,
+            save_path: "~/.config/glowmux/session.json".to_string(),
         }
     }
 }

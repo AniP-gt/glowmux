@@ -15,16 +15,16 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: ccmux-windows-x64.exe
+            artifact: glowmux-windows-x64.exe
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: ccmux-macos-x64
+            artifact: glowmux-macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: ccmux-macos-arm64
+            artifact: glowmux-macos-arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: ccmux-linux-x64
+            artifact: glowmux-linux-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -41,11 +41,11 @@ jobs:
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/ccmux ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/glowmux ${{ matrix.artifact }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
-        run: cp target/${{ matrix.target }}/release/ccmux.exe ${{ matrix.artifact }}
+        run: cp target/${{ matrix.target }}/release/glowmux.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -68,10 +68,10 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum ccmux-windows-x64.exe/ccmux-windows-x64.exe \
-                    ccmux-macos-x64/ccmux-macos-x64 \
-                    ccmux-macos-arm64/ccmux-macos-arm64 \
-                    ccmux-linux-x64/ccmux-linux-x64 \
+          sha256sum glowmux-windows-x64.exe/glowmux-windows-x64.exe \
+                    glowmux-macos-x64/glowmux-macos-x64 \
+                    glowmux-macos-arm64/glowmux-macos-arm64 \
+                    glowmux-linux-x64/glowmux-linux-x64 \
             | sed 's|[^ ]*/||' > ../checksums.txt
 
       - name: Create Release
@@ -79,10 +79,10 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            artifacts/ccmux-windows-x64.exe/ccmux-windows-x64.exe
-            artifacts/ccmux-macos-x64/ccmux-macos-x64
-            artifacts/ccmux-macos-arm64/ccmux-macos-arm64
-            artifacts/ccmux-linux-x64/ccmux-linux-x64
+            artifacts/glowmux-windows-x64.exe/glowmux-windows-x64.exe
+            artifacts/glowmux-macos-x64/glowmux-macos-x64
+            artifacts/glowmux-macos-arm64/glowmux-macos-arm64
+            artifacts/glowmux-linux-x64/glowmux-linux-x64
             checksums.txt
 
   publish-npm:
