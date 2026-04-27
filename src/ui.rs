@@ -209,6 +209,16 @@ fn render_tab_bar(app: &mut App, frame: &mut Frame, area: Rect) {
 // ─── Main area ────────────────────────────────────────────
 
 fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
+    // Preview zoom: expand the preview to the full content area.
+    if app.preview_zoomed && app.ws().preview.is_active() {
+        app.ws_mut().last_file_tree_rect = None;
+        app.ws_mut().last_preview_rect = Some(area);
+        // Clear stale pane rects so mouse drag hit-testing doesn't fire on ghost areas.
+        app.ws_mut().last_pane_rects = Vec::new();
+        render_preview(app, frame, area);
+        return;
+    }
+
     let tree_width = app.file_tree_width;
     let preview_width = app.preview_width;
 

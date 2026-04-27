@@ -638,6 +638,8 @@ pub struct App {
     pub copy_mode: Option<CopyModeState>,
     pub pane_list_overlay: PaneListOverlay,
     pub filetree_action_popup: FileTreeActionPopup,
+    /// When true, the preview panel is expanded to fill the full content area.
+    pub preview_zoomed: bool,
 }
 
 impl App {
@@ -723,6 +725,7 @@ impl App {
             copy_mode: None,
             pane_list_overlay: PaneListOverlay::default(),
             filetree_action_popup: FileTreeActionPopup::default(),
+            preview_zoomed: false,
         };
 
         // Session restore takes priority over startup panes. Only apply startup
@@ -1068,7 +1071,10 @@ impl App {
         }
 
         // Toggle pane zoom (configurable, default Alt+Z)
-        if self.key_matches(key, &self.config.keybindings.zoom) {
+        // When the preview has focus, Alt+Z zooms the preview instead (handled in handle_preview_key).
+        if self.key_matches(key, &self.config.keybindings.zoom)
+            && self.ws().focus_target != FocusTarget::Preview
+        {
             self.toggle_zoom();
             return Ok(true);
         }
@@ -1204,6 +1210,7 @@ impl App {
         // Close pane / preview / tab (configurable, default Ctrl+W)
         if self.key_matches(key, &self.config.keybindings.pane_close) {
             if self.ws().focus_target == FocusTarget::Preview {
+                self.preview_zoomed = false;
                 self.ws_mut().preview.close();
                 self.ws_mut().focus_target = FocusTarget::Pane;
                 return Ok(true);
@@ -1286,6 +1293,20 @@ impl App {
     }
 
     fn handle_file_tree_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Ctrl+D / Ctrl+U — half-page scroll (5 lines), take priority over global splits.
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    for _ in 0..5 { self.ws_mut().file_tree.move_down(); }
+                    return Ok(true);
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    for _ in 0..5 { self.ws_mut().file_tree.move_up(); }
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.ws_mut().file_tree.move_down();
@@ -1321,6 +1342,8 @@ impl App {
                             let mut picker = self.image_picker.take();
                             self.ws_mut().preview.load(&path, picker.as_mut());
                             self.image_picker = picker;
+                            // Shift focus to the preview so j/k/y/Y work immediately
+                            self.ws_mut().focus_target = FocusTarget::Preview;
                         }
                     }
                 }
@@ -1357,6 +1380,7 @@ impl App {
         // Close preview (configurable, default Ctrl+W)
         if self.key_matches(key, &self.config.keybindings.pane_close) {
             self.clear_selection_if_preview();
+            self.preview_zoomed = false;
             self.ws_mut().preview.close();
             self.ws_mut().focus_target = FocusTarget::Pane;
             return Ok(true);
@@ -1378,6 +1402,15 @@ impl App {
             }
             (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
                 self.ws_mut().preview.scroll_up(1);
+                Ok(true)
+            }
+            // Ctrl+D / Ctrl+U — half-page scroll (5 lines), overrides global split bindings.
+            (KeyModifiers::CONTROL, KeyCode::Char('d')) | (KeyModifiers::CONTROL, KeyCode::Char('D')) => {
+                self.ws_mut().preview.scroll_down(5);
+                Ok(true)
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('u')) | (KeyModifiers::CONTROL, KeyCode::Char('U')) => {
+                self.ws_mut().preview.scroll_up(5);
                 Ok(true)
             }
             (_, KeyCode::PageDown) => {
@@ -1407,7 +1440,13 @@ impl App {
                 Ok(true)
             }
             (_, KeyCode::Esc) => {
-                self.ws_mut().focus_target = FocusTarget::Pane;
+                self.preview_zoomed = false;
+                // Return focus to the file tree if it's visible, otherwise to the pane.
+                self.ws_mut().focus_target = if self.ws().file_tree_visible {
+                    FocusTarget::FileTree
+                } else {
+                    FocusTarget::Pane
+                };
                 Ok(true)
             }
             (KeyModifiers::CONTROL, KeyCode::Right) => {
@@ -1416,6 +1455,42 @@ impl App {
             }
             (KeyModifiers::CONTROL, KeyCode::Left) => {
                 self.focus_prev_pane();
+                Ok(true)
+            }
+            // y — copy filename to clipboard
+            (KeyModifiers::NONE, KeyCode::Char('y')) => {
+                if let Some(path) = self.ws().preview.file_path.clone() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !name.is_empty() {
+                        self.copy_to_clipboard(&name);
+                        self.status_flash = Some((
+                            format!("Copied filename: {}", name),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+                Ok(true)
+            }
+            // Y — copy full file path to clipboard (SHIFT+y or plain uppercase Y)
+            (KeyModifiers::SHIFT, KeyCode::Char('Y'))
+            | (KeyModifiers::NONE, KeyCode::Char('Y')) => {
+                if let Some(path) = self.ws().preview.file_path.clone() {
+                    let full = path.to_string_lossy().to_string();
+                    self.copy_to_clipboard(&full);
+                    self.status_flash = Some((
+                        format!("Copied path: {}", full),
+                        std::time::Instant::now(),
+                    ));
+                }
+                Ok(true)
+            }
+            // Alt+Z — toggle preview zoom (full-screen preview)
+            (KeyModifiers::ALT, KeyCode::Char('z')) | (KeyModifiers::ALT, KeyCode::Char('Z')) => {
+                self.preview_zoomed = !self.preview_zoomed;
+                self.mark_layout_change();
                 Ok(true)
             }
             _ => Ok(true),
@@ -3499,6 +3574,7 @@ impl App {
                         Ok(p) if p.is_dir() => p,
                         _ => continue,
                     };
+                    let mut preview_closed_by_cwd = false;
                     for ws in &mut self.workspaces {
                         if ws.panes.contains_key(&pane_id) {
                             // Update pane's cwd
@@ -3516,9 +3592,13 @@ impl App {
                                 ws.cwd = new_cwd;
                                 ws.name = dir_name(&ws.cwd);
                                 ws.preview.close();
+                                preview_closed_by_cwd = true;
                             }
                             break;
                         }
+                    }
+                    if preview_closed_by_cwd {
+                        self.preview_zoomed = false;
                     }
                 }
                 AppEvent::PtyOutput { pane_id, lines } => {
