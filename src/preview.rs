@@ -75,13 +75,13 @@ impl Preview {
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
             Err(_) => {
-                self.lines = vec!["ファイルを読み込めませんでした".to_string()];
+                self.lines = vec!["Failed to read file".to_string()];
                 return;
             }
         };
 
         if !metadata.is_file() {
-            self.lines = vec!["通常ファイルではありません".to_string()];
+            self.lines = vec!["Not a regular file".to_string()];
             return;
         }
 
@@ -89,7 +89,7 @@ impl Preview {
         if is_image_extension(path) {
             if metadata.len() > MAX_IMAGE_SIZE {
                 self.lines = vec![format!(
-                    "画像が大きすぎます（{:.1}MB > {:.0}MB）",
+                    "Image too large ({:.1}MB > {:.0}MB)",
                     metadata.len() as f64 / 1024.0 / 1024.0,
                     MAX_IMAGE_SIZE as f64 / 1024.0 / 1024.0
                 )];
@@ -114,7 +114,7 @@ impl Preview {
 
         if metadata.len() > MAX_FILE_SIZE {
             self.lines = vec![format!(
-                "ファイルが大きすぎます（{:.1}MB > {:.0}MB）",
+                "File too large ({:.1}MB > {:.0}MB)",
                 metadata.len() as f64 / 1024.0 / 1024.0,
                 MAX_FILE_SIZE as f64 / 1024.0 / 1024.0
             )];
@@ -137,7 +137,7 @@ impl Preview {
                     .collect();
             }
             Err(_) => {
-                self.lines = vec!["ファイルを読み込めませんでした".to_string()];
+                self.lines = vec!["Failed to read file".to_string()];
                 return;
             }
         }

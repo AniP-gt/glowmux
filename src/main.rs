@@ -5,6 +5,7 @@ mod claude_monitor;
 mod config;
 mod filetree;
 mod hooks;
+mod keybinding;
 mod pane;
 mod preview;
 mod runtime;
