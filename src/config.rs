@@ -227,6 +227,8 @@ pub struct KeybindingsConfig {
     pub clipboard_copy: String,
     pub ai_title_toggle: String,
     pub feature_toggle: String,
+    pub pane_next: String,
+    pub pane_prev: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -427,6 +429,8 @@ impl Default for KeybindingsConfig {
             clipboard_copy: "ctrl+y".to_string(),
             ai_title_toggle: "alt+a".to_string(),
             feature_toggle: "?".to_string(),
+            pane_next: "alt+]".to_string(),
+            pane_prev: "alt+[".to_string(),
         }
     }
 }

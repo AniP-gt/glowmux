@@ -105,6 +105,8 @@ pub fn validate_keybindings(kb: &KeybindingsConfig) -> Vec<String> {
         ("clipboard_copy", &kb.clipboard_copy),
         ("ai_title_toggle", &kb.ai_title_toggle),
         ("feature_toggle", &kb.feature_toggle),
+        ("pane_next", &kb.pane_next),
+        ("pane_prev", &kb.pane_prev),
     ];
 
     let mut seen: HashMap<(KeyModifiers, KeyCode), Vec<&str>> = HashMap::new();

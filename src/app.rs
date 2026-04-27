@@ -1121,14 +1121,18 @@ impl App {
             }
         }
 
-        // Ctrl+Right — next pane
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Right {
+        // Ctrl+Right / pane_next — next pane (cycle)
+        if (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Right)
+            || self.key_matches(key, &self.config.keybindings.pane_next)
+        {
             self.focus_next_pane();
             return Ok(true);
         }
 
-        // Ctrl+Left — previous pane
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Left {
+        // Ctrl+Left / pane_prev — previous pane (cycle)
+        if (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Left)
+            || self.key_matches(key, &self.config.keybindings.pane_prev)
+        {
             self.focus_prev_pane();
             return Ok(true);
         }
