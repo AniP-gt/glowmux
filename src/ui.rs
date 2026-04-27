@@ -825,15 +825,17 @@ fn render_terminal_content(
 
     // Show cursor when focused (but not during copy mode — the cursor
     // position is meaningless when the user is browsing scrollback).
+    // For Claude panes we ignore hide_cursor: Claude Code frequently toggles
+    // hide/show around redraws, and a missed show_cursor escape (e.g. due to
+    // PTY read chunking) would leave the cursor permanently invisible.
+    // For other programs (less, vim, htop…) we honour hide_cursor normally.
     let screen = parser.screen();
-    let show_cursor = is_focused && copy_mode.is_none() && (!screen.hide_cursor() || pane.is_claude_running());
+    let show_cursor = is_focused
+        && copy_mode.is_none()
+        && (!screen.hide_cursor() || pane.is_claude_running());
     if show_cursor {
         let cursor = screen.cursor_position();
-        let cursor_x = if pane.is_claude_running() {
-            area.x + cursor.1.saturating_sub(1)
-        } else {
-            area.x + cursor.1
-        };
+        let cursor_x = area.x + cursor.1;
         let cursor_y = area.y + cursor.0;
         if cursor_x < area.x + area.width && cursor_y < area.y + area.height {
             frame.set_cursor_position((cursor_x, cursor_y));
