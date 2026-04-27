@@ -1,4 +1,4 @@
-# ccmux — Claude Code Multiplexer
+# glowmux — Claude Code Multiplexer
 
 ## Overview
 Rust TUI tool for managing multiple Claude Code instances in split panes.

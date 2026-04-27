@@ -1,18 +1,18 @@
-# ccmux
+# glowmux
 
 Claude Code Multiplexer — manage multiple Claude Code instances in TUI split panes.
 
 ## Install
 
 ```bash
-npm install -g ccmux-cli
+npm install -g glowmux-cli
 ```
 
 ## Usage
 
 ```bash
-ccmux                    # Launch in current directory
-ccmux /path/to/project   # Launch in specified directory
+glowmux                    # Launch in current directory
+glowmux /path/to/project   # Launch in specified directory
 ```
 
 ## Features
@@ -27,8 +27,7 @@ ccmux /path/to/project   # Launch in specified directory
 
 ## Documentation
 
-- [Docs](https://shin-sibainu.github.io/ccmux/)
-- [GitHub](https://github.com/Shin-sibainu/ccmux)
+- [GitHub](https://github.com/AniP-gt/glowmux)
 
 ## License
 
