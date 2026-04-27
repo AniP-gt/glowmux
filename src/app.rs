@@ -63,11 +63,11 @@ impl Default for PaneState {
 }
 
 pub const FEATURES: &[(&str, &str)] = &[
-    ("status_dot", "状態ドット"),
-    ("status_bg_color", "背景色変化"),
-    ("status_bar", "ステータスバー"),
-    ("ai_title", "AIタイトル"),
-    ("zoom", "ズーム"),
+    ("status_dot", "Status Dot"),
+    ("status_bg_color", "BG Color"),
+    ("status_bar", "Status Bar"),
+    ("ai_title", "AI Title"),
+    ("zoom", "Zoom"),
 ];
 
 #[derive(Debug, Clone)]
@@ -78,11 +78,11 @@ pub struct FeatureToggleState {
 }
 
 pub const SETTINGS_ITEMS: &[(&str, &str)] = &[
-    ("terminal.scrollback", "スクロールバック行数"),
-    ("layout.breakpoint_stack", "レイアウト切替幅(stack)"),
-    ("layout.breakpoint_split2", "レイアウト切替幅(split2)"),
-    ("ai_title_engine.update_interval_sec", "AIタイトル更新間隔(秒)"),
-    ("ai_title_engine.max_chars", "AIタイトル最大文字数"),
+    ("terminal.scrollback", "Scrollback Lines"),
+    ("layout.breakpoint_stack", "Layout Breakpoint (stack)"),
+    ("layout.breakpoint_split2", "Layout Breakpoint (split2)"),
+    ("ai_title_engine.update_interval_sec", "AI Title Update Interval (sec)"),
+    ("ai_title_engine.max_chars", "AI Title Max Chars"),
 ];
 
 #[derive(Debug, Clone)]
@@ -627,6 +627,11 @@ pub struct App {
 
 impl App {
     pub fn new(rows: u16, cols: u16, config: ConfigFile) -> Result<Self> {
+        let kb_warnings = crate::keybinding::validate_keybindings(&config.keybindings);
+        for w in kb_warnings {
+            eprintln!("glowmux: duplicate keybinding: {}", w);
+        }
+
         let (event_tx, event_rx) = mpsc::channel();
 
         let pane_rows = rows.saturating_sub(5); // title + tab bar + status + borders
@@ -851,6 +856,11 @@ impl App {
         &mut self.workspaces[self.active_tab]
     }
 
+    fn key_matches(&self, key: crossterm::event::KeyEvent, binding: &str) -> bool {
+        crate::keybinding::parse_keybinding(binding)
+            .map(|(m, c)| key.modifiers == m && key.code == c)
+            .unwrap_or(false)
+    }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         // Rename mode — swallow all input until Enter/Esc.
@@ -902,7 +912,7 @@ impl App {
         }
 
         // Prefix key handling
-        let prefix_key = parse_prefix_key(&self.config.keybindings.prefix);
+        let prefix_key = crate::keybinding::parse_keybinding(&self.config.keybindings.prefix);
         if let Some((prefix_mods, prefix_code)) = prefix_key {
             if !self.prefix_active {
                 if key.modifiers == prefix_mods && key.code == prefix_code {
@@ -915,11 +925,14 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else if let KeyCode::Char('q') = key.code {
+                } else if self.key_matches(key, &self.config.keybindings.quit) {
                     self.should_quit = true;
                     return Ok(true);
-                } else if key.code == KeyCode::Char(' ') {
-                    // Prefix + Space — cycle layout mode
+                } else if crate::keybinding::parse_keybinding(&self.config.keybindings.layout_cycle)
+                    .map(|(_, code)| key.code == code)
+                    .unwrap_or(false)
+                {
+                    // Prefix + layout_cycle key — cycle layout mode
                     self.cycle_layout_mode();
                     return Ok(true);
                 } else if key.code == KeyCode::Char('[') {
@@ -932,16 +945,14 @@ impl App {
             }
         }
 
-        // Ctrl+Q — quit
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+        // Quit (configurable, default Ctrl+Q)
+        if self.key_matches(key, &self.config.keybindings.quit) {
             self.should_quit = true;
             return Ok(true);
         }
 
-        // Alt+R — rename active tab (session only)
-        if key.modifiers == KeyModifiers::ALT
-            && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
-        {
+        // Tab rename (configurable, default Alt+R)
+        if self.key_matches(key, &self.config.keybindings.tab_rename) {
             self.rename_input = Some(String::new());
             if !self.status_bar_visible {
                 self.mark_layout_change();
@@ -979,8 +990,8 @@ impl App {
             // No selection — fall through to forward Ctrl+C to PTY
         }
 
-        // Ctrl+Y — copy focused pane's visible content to clipboard
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('y') {
+        // Clipboard copy — focused pane's visible content (configurable, default Ctrl+Y)
+        if self.key_matches(key, &self.config.keybindings.clipboard_copy) {
             let content = {
                 let pane_id = self.ws().focused_pane_id;
                 self.ws().panes.get(&pane_id)
@@ -988,34 +999,32 @@ impl App {
                     .unwrap_or_default()
             };
             if content.trim().is_empty() {
-                self.status_flash = Some(("クリップボードにコピーするコンテンツがありません".to_string(), std::time::Instant::now()));
+                self.status_flash = Some(("No content to copy".to_string(), std::time::Instant::now()));
             } else {
                 self.copy_to_clipboard(&content);
                 let lines = content.lines().count();
-                self.status_flash = Some((format!("コピーしました（{}行）", lines), std::time::Instant::now()));
+                self.status_flash = Some((format!("Copied ({} lines)", lines), std::time::Instant::now()));
             }
             self.dirty = true;
             return Ok(true);
         }
 
-        // Ctrl+T / Alt+T — new tab (Alt+T groups with Alt-based tab nav)
-        if (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
-        {
+        // New tab (configurable, default Ctrl+T)
+        if self.key_matches(key, &self.config.keybindings.tab_new) {
             self.new_tab()?;
             return Ok(true);
         }
 
-        // Alt+Right — next tab
-        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Right {
+        // Next tab (configurable, default Alt+Right)
+        if self.key_matches(key, &self.config.keybindings.tab_next) {
             if !self.workspaces.is_empty() {
                 self.active_tab = (self.active_tab + 1) % self.workspaces.len();
             }
             return Ok(true);
         }
 
-        // Alt+Left — previous tab
-        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Left {
+        // Previous tab (configurable, default Alt+Left)
+        if self.key_matches(key, &self.config.keybindings.tab_prev) {
             if !self.workspaces.is_empty() {
                 self.active_tab = if self.active_tab == 0 {
                     self.workspaces.len() - 1
@@ -1035,25 +1044,22 @@ impl App {
             return Ok(true);
         }
 
-        // Alt+Z — toggle pane zoom
-        if key.modifiers == KeyModifiers::ALT
-            && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
-        {
+        // Toggle pane zoom (configurable, default Alt+Z)
+        if self.key_matches(key, &self.config.keybindings.zoom) {
             self.toggle_zoom();
             return Ok(true);
         }
 
-        // Alt+A — toggle AI title generation
-        if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('a') {
+        // Toggle AI title generation (configurable, default Alt+A)
+        if self.key_matches(key, &self.config.keybindings.ai_title_toggle) {
             self.ai_title_enabled = !self.ai_title_enabled;
             self.config.features.ai_title = self.ai_title_enabled;
             self.dirty = true;
             return Ok(true);
         }
 
-        // ? — feature toggle dialog (pane focus only)
-        if key.modifiers == KeyModifiers::NONE
-            && key.code == KeyCode::Char('?')
+        // Feature toggle dialog (configurable, default '?', pane focus only)
+        if self.key_matches(key, &self.config.keybindings.feature_toggle)
             && self.ws().focus_target == FocusTarget::Pane
         {
             self.feature_toggle.visible = true;
@@ -1063,8 +1069,8 @@ impl App {
             return Ok(true);
         }
 
-        // Ctrl+, — settings panel
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(',') {
+        // Settings panel (configurable, default Ctrl+,)
+        if self.key_matches(key, &self.config.keybindings.settings) {
             self.settings_panel.visible = true;
             self.settings_panel.selected = 0;
             self.settings_panel.editing = false;
@@ -1073,8 +1079,8 @@ impl App {
             return Ok(true);
         }
 
-        // Ctrl+L — toggle layout picker
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('l') {
+        // Layout picker (configurable, default Ctrl+L)
+        if self.key_matches(key, &self.config.keybindings.layout_picker) {
             if self.ws().layout.pane_count() > 1 {
                 self.layout_picker.visible = true;
                 self.layout_picker.selected = 0;
@@ -1095,37 +1101,38 @@ impl App {
             }
         }
 
-        // Alt+h/j/k/l — directional pane focus
-        if key.modifiers == KeyModifiers::ALT && self.ws().focus_target == FocusTarget::Pane {
-            match key.code {
-                KeyCode::Char('h') | KeyCode::Char('H') => {
-                    self.focus_pane_in_direction(Direction::Left);
-                    return Ok(true);
-                }
-                KeyCode::Char('j') | KeyCode::Char('J') => {
-                    self.focus_pane_in_direction(Direction::Down);
-                    return Ok(true);
-                }
-                KeyCode::Char('k') | KeyCode::Char('K') => {
-                    self.focus_pane_in_direction(Direction::Up);
-                    return Ok(true);
-                }
-                KeyCode::Char('l') | KeyCode::Char('L') => {
-                    self.focus_pane_in_direction(Direction::Right);
-                    return Ok(true);
-                }
-                _ => {}
+        // Directional pane focus (configurable, defaults Alt+h/j/k/l)
+        if self.ws().focus_target == FocusTarget::Pane {
+            if self.key_matches(key, &self.config.keybindings.pane_left) {
+                self.focus_pane_in_direction(Direction::Left);
+                return Ok(true);
+            }
+            if self.key_matches(key, &self.config.keybindings.pane_down) {
+                self.focus_pane_in_direction(Direction::Down);
+                return Ok(true);
+            }
+            if self.key_matches(key, &self.config.keybindings.pane_up) {
+                self.focus_pane_in_direction(Direction::Up);
+                return Ok(true);
+            }
+            if self.key_matches(key, &self.config.keybindings.pane_right) {
+                self.focus_pane_in_direction(Direction::Right);
+                return Ok(true);
             }
         }
 
-        // Ctrl+Right — next pane
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Right {
+        // Ctrl+Right / pane_next — next pane (cycle)
+        if (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Right)
+            || self.key_matches(key, &self.config.keybindings.pane_next)
+        {
             self.focus_next_pane();
             return Ok(true);
         }
 
-        // Ctrl+Left — previous pane
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Left {
+        // Ctrl+Left / pane_prev — previous pane (cycle)
+        if (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Left)
+            || self.key_matches(key, &self.config.keybindings.pane_prev)
+        {
             self.focus_prev_pane();
             return Ok(true);
         }
@@ -1137,21 +1144,21 @@ impl App {
 
         // File tree mode
         if self.ws().focus_target == FocusTarget::FileTree {
-            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
+            if self.key_matches(key, &self.config.keybindings.file_tree) {
                 self.toggle_file_tree();
                 return Ok(true);
             }
             return self.handle_file_tree_key(key);
         }
 
-        // Ctrl+F — toggle file tree
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('f') {
+        // Toggle file tree (configurable, default Ctrl+F)
+        if self.key_matches(key, &self.config.keybindings.file_tree) {
             self.toggle_file_tree();
             return Ok(true);
         }
 
-        // Ctrl+P — swap preview and terminal positions
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('p') {
+        // Swap preview and terminal positions (configurable, default Ctrl+P)
+        if self.key_matches(key, &self.config.keybindings.preview_swap) {
             self.layout_swapped = !self.layout_swapped;
             return Ok(true);
         }
@@ -1159,56 +1166,62 @@ impl App {
         let multi_pane = self.ws().layout.pane_count() > 1;
         let multi_tab = self.workspaces.len() > 1;
 
-        match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
-                self.split_focused_pane(SplitDirection::Vertical)?;
-                Ok(true)
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
-                self.split_focused_pane(SplitDirection::Horizontal)?;
-                Ok(true)
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-                if self.ws().focus_target == FocusTarget::Preview {
-                    self.ws_mut().preview.close();
-                    self.ws_mut().focus_target = FocusTarget::Pane;
-                    return Ok(true);
-                }
-                if multi_pane || multi_tab {
-                    let pane_id = self.ws().focused_pane_id;
-                    if self.config.worktree.close_confirm {
-                        let worktree_path = self.ws().panes.get(&pane_id)
-                            .and_then(|p| p.worktree_path.clone());
-                        self.close_confirm_dialog = CloseConfirmDialog {
-                            visible: true,
-                            pane_id,
-                            worktree_path,
-                            focused: CloseConfirmFocus::No,
-                        };
-                        self.dirty = true;
-                    } else if multi_pane {
-                        self.close_focused_pane();
-                    } else {
-                        self.close_tab(self.active_tab);
-                    }
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
-                self.pane_create_dialog = PaneCreateDialog {
-                    visible: true,
-                    worktree_enabled: self.config.worktree.auto_create,
-                    agent: self.config.startup.default_agent.clone(),
-                    focused_field: PaneCreateField::BranchName,
-                    ..Default::default()
-                };
-                self.dirty = true;
-                Ok(true)
-            }
-            _ => Ok(false),
+        // Vertical split (configurable, default Ctrl+D)
+        if self.key_matches(key, &self.config.keybindings.split_vertical) {
+            self.split_focused_pane(SplitDirection::Vertical)?;
+            return Ok(true);
         }
+
+        // Horizontal split (configurable, default Ctrl+E)
+        if self.key_matches(key, &self.config.keybindings.split_horizontal) {
+            self.split_focused_pane(SplitDirection::Horizontal)?;
+            return Ok(true);
+        }
+
+        // Close pane / preview / tab (configurable, default Ctrl+W)
+        if self.key_matches(key, &self.config.keybindings.pane_close) {
+            if self.ws().focus_target == FocusTarget::Preview {
+                self.ws_mut().preview.close();
+                self.ws_mut().focus_target = FocusTarget::Pane;
+                return Ok(true);
+            }
+            if multi_pane || multi_tab {
+                let pane_id = self.ws().focused_pane_id;
+                if self.config.worktree.close_confirm {
+                    let worktree_path = self.ws().panes.get(&pane_id)
+                        .and_then(|p| p.worktree_path.clone());
+                    self.close_confirm_dialog = CloseConfirmDialog {
+                        visible: true,
+                        pane_id,
+                        worktree_path,
+                        focused: CloseConfirmFocus::No,
+                    };
+                    self.dirty = true;
+                } else if multi_pane {
+                    self.close_focused_pane();
+                } else {
+                    self.close_tab(self.active_tab);
+                }
+                return Ok(true);
+            } else {
+                return Ok(false);
+            }
+        }
+
+        // Open pane create dialog (configurable, default Ctrl+N)
+        if self.key_matches(key, &self.config.keybindings.pane_create) {
+            self.pane_create_dialog = PaneCreateDialog {
+                visible: true,
+                worktree_enabled: self.config.worktree.auto_create,
+                agent: self.config.startup.default_agent.clone(),
+                focused_field: PaneCreateField::BranchName,
+                ..Default::default()
+            };
+            self.dirty = true;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) -> bool {
@@ -1258,7 +1271,7 @@ impl App {
                 self.ws_mut().file_tree.move_up();
                 Ok(true)
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('o') => {
                 let path = self.ws_mut().file_tree.toggle_or_select();
                 if let Some(path) = path {
                     match self.config.filetree.enter_action.as_str() {
@@ -1276,7 +1289,7 @@ impl App {
                         other => {
                             if other != "preview" {
                                 self.status_flash = Some((
-                                    format!("不明なenter_action '{}'; プレビューにフォールバック", other),
+                                    format!("unknown enter_action '{}'; falling back to preview", other),
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -1303,17 +1316,24 @@ impl App {
     }
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Close preview (configurable, default Ctrl+W)
+        if self.key_matches(key, &self.config.keybindings.pane_close) {
+            self.clear_selection_if_preview();
+            self.ws_mut().preview.close();
+            self.ws_mut().focus_target = FocusTarget::Pane;
+            return Ok(true);
+        }
+        // Swap preview/terminal positions (configurable, default Ctrl+P)
+        if self.key_matches(key, &self.config.keybindings.preview_swap) {
+            self.layout_swapped = !self.layout_swapped;
+            return Ok(true);
+        }
+        // Quit (configurable, default Ctrl+Q)
+        if self.key_matches(key, &self.config.keybindings.quit) {
+            self.should_quit = true;
+            return Ok(true);
+        }
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-                self.clear_selection_if_preview();
-                self.ws_mut().preview.close();
-                self.ws_mut().focus_target = FocusTarget::Pane;
-                Ok(true)
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
-                self.layout_swapped = !self.layout_swapped;
-                Ok(true)
-            }
             (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
                 self.ws_mut().preview.scroll_down(1);
                 Ok(true)
@@ -1350,10 +1370,6 @@ impl App {
             }
             (_, KeyCode::Esc) => {
                 self.ws_mut().focus_target = FocusTarget::Pane;
-                Ok(true)
-            }
-            (KeyModifiers::CONTROL, KeyCode::Char('q')) => {
-                self.should_quit = true;
                 Ok(true)
             }
             (KeyModifiers::CONTROL, KeyCode::Right) => {
@@ -1717,8 +1733,7 @@ impl App {
     }
 
     fn handle_layout_picker_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Ctrl+Q always quits, even when dialog is open
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+        if self.key_matches(key, &self.config.keybindings.quit) {
             self.should_quit = true;
             return Ok(true);
         }
@@ -1780,8 +1795,7 @@ impl App {
     }
 
     fn handle_feature_toggle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Ctrl+Q always quits, even when dialog is open
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
+        if self.key_matches(key, &self.config.keybindings.quit) {
             self.should_quit = true;
             return Ok(true);
         }
@@ -2540,13 +2554,13 @@ impl App {
         match source {
             SizeSource::Parser => {
                 self.status_flash = Some((
-                    "コピーモード: レイアウト未確定のためパーサーサイズを使用".to_string(),
+                    "copy mode: layout not determined, using parser size".to_string(),
                     std::time::Instant::now(),
                 ));
             }
             SizeSource::Default => {
                 self.status_flash = Some((
-                    "コピーモード: デフォルトサイズ(24x80)を使用".to_string(),
+                    "copy mode: using default size (24x80)".to_string(),
                     std::time::Instant::now(),
                 ));
             }
@@ -2697,7 +2711,7 @@ impl App {
                 Ok(guard) => guard,
                 Err(_poisoned) => {
                     self.status_flash = Some((
-                        "警告: ターミナル状態が破損している可能性があります".to_string(),
+                        "warning: terminal state may be corrupted".to_string(),
                         std::time::Instant::now(),
                     ));
                     return;
@@ -2753,7 +2767,7 @@ impl App {
             self.copy_to_clipboard(&text);
             let line_count = text.lines().count();
             self.status_flash = Some((
-                format!("コピーしました（{}行）", line_count),
+                format!("Copied ({} lines)", line_count),
                 std::time::Instant::now(),
             ));
         }
@@ -2817,7 +2831,7 @@ impl App {
         let editor = self.config.filetree.editor.trim().to_string();
         if editor.is_empty() {
             self.status_flash = Some((
-                "エディタが設定されていません".to_string(),
+                "no editor configured".to_string(),
                 std::time::Instant::now(),
             ));
             return;
@@ -2826,7 +2840,7 @@ impl App {
             Some(e) => e,
             None => {
                 self.status_flash = Some((
-                    "エディタ名に不正な文字が含まれています".to_string(),
+                    "editor name contains invalid characters".to_string(),
                     std::time::Instant::now(),
                 ));
                 return;
@@ -2837,7 +2851,7 @@ impl App {
             Some(p) => p,
             None => {
                 self.status_flash = Some((
-                    "ファイルパスに不正な文字が含まれています".to_string(),
+                    "file path contains invalid characters".to_string(),
                     std::time::Instant::now(),
                 ));
                 return;
@@ -3467,12 +3481,13 @@ impl App {
                                         if let Some(handle) = &self.tokio_handle {
                                             self.last_ai_title_request.insert(pane_id, Instant::now());
                                             let config = self.config.ai_title_engine.clone();
+                                            let prompt_template = self.config.ai.title.prompt.clone();
                                             let ollama_url = self.config.ai.ollama.base_url.clone();
                                             let ollama_model = self.config.ai.ollama.model.clone();
                                             let gemini_api_key = self.config.ai.gemini.api_key.clone();
                                             let gemini_model = self.config.ai.gemini.model.clone();
                                             handle.spawn(async move {
-                                                if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
+                                                if let Some(title) = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
                                                     let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                                 }
                                             });
@@ -3508,12 +3523,13 @@ impl App {
                                                 if let Some(handle) = &self.tokio_handle {
                                                     self.last_ai_title_request.insert(pane_id, Instant::now());
                                                     let config = self.config.ai_title_engine.clone();
+                                                    let prompt_template = self.config.ai.title.prompt.clone();
                                                     let ollama_url = self.config.ai.ollama.base_url.clone();
                                                     let ollama_model = self.config.ai.ollama.model.clone();
                                                     let gemini_api_key = self.config.ai.gemini.api_key.clone();
                                                     let gemini_model = self.config.ai.gemini.model.clone();
                                                     handle.spawn(async move {
-                                                        if let Some(title) = ai_title::generate_title(&output, &config, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
+                                                        if let Some(title) = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
                                                             let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                                         }
                                                     });
@@ -3655,20 +3671,6 @@ impl App {
         for ws in &mut self.workspaces {
             ws.shutdown();
         }
-    }
-}
-
-/// Extract directory name from a path for tab title.
-fn parse_prefix_key(s: &str) -> Option<(KeyModifiers, KeyCode)> {
-    let s = s.trim().to_lowercase();
-    if let Some(key) = s.strip_prefix("ctrl+") {
-        let c = key.chars().next()?;
-        Some((KeyModifiers::CONTROL, KeyCode::Char(c)))
-    } else if let Some(key) = s.strip_prefix("alt+") {
-        let c = key.chars().next()?;
-        Some((KeyModifiers::ALT, KeyCode::Char(c)))
-    } else {
-        None
     }
 }
 

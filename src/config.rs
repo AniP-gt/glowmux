@@ -200,8 +200,7 @@ pub struct SessionConfig {
     pub restore_on_start: bool,
 }
 
-/// Key binding configuration. `prefix` is active (ctrl+b default). Other fields
-/// document intended bindings; only `prefix` is wired to runtime behavior.
+/// Key binding configuration. All fields are wired to runtime behavior.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
@@ -213,6 +212,23 @@ pub struct KeybindingsConfig {
     pub pane_right: String,
     pub pane_up: String,
     pub pane_down: String,
+    pub quit: String,
+    pub tab_rename: String,
+    pub tab_new: String,
+    pub tab_next: String,
+    pub tab_prev: String,
+    pub settings: String,
+    pub file_tree: String,
+    pub preview_swap: String,
+    pub split_vertical: String,
+    pub split_horizontal: String,
+    pub pane_close: String,
+    pub pane_create: String,
+    pub clipboard_copy: String,
+    pub ai_title_toggle: String,
+    pub feature_toggle: String,
+    pub pane_next: String,
+    pub pane_prev: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -398,6 +414,23 @@ impl Default for KeybindingsConfig {
             pane_right: "alt+l".to_string(),
             pane_up: "alt+k".to_string(),
             pane_down: "alt+j".to_string(),
+            quit: "ctrl+q".to_string(),
+            tab_rename: "alt+r".to_string(),
+            tab_new: "ctrl+t".to_string(),
+            tab_next: "alt+right".to_string(),
+            tab_prev: "alt+left".to_string(),
+            settings: "ctrl+,".to_string(),
+            file_tree: "ctrl+f".to_string(),
+            preview_swap: "ctrl+p".to_string(),
+            split_vertical: "ctrl+d".to_string(),
+            split_horizontal: "ctrl+e".to_string(),
+            pane_close: "ctrl+w".to_string(),
+            pane_create: "ctrl+n".to_string(),
+            clipboard_copy: "ctrl+y".to_string(),
+            ai_title_toggle: "alt+a".to_string(),
+            feature_toggle: "?".to_string(),
+            pane_next: "alt+]".to_string(),
+            pane_prev: "alt+[".to_string(),
         }
     }
 }

@@ -9,6 +9,7 @@ use crate::app::{
     PaneCreateDialog, PaneCreateField, PaneStatus, WorktreeCleanupDialog, FEATURES,
     SETTINGS_ITEMS,
 };
+use crate::keybinding;
 
 // ─── Theme (Claude-inspired) ──────────────────────────────
 const BG: Color = Color::Rgb(0x0d, 0x11, 0x17);
@@ -853,7 +854,7 @@ fn render_preview(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 
     if is_binary {
-        let msg = Paragraph::new("\u{2718} バイナリファイルです")
+        let msg = Paragraph::new("\u{2718} Binary file")
             .style(Style::default().fg(TEXT_DIM).bg(PANEL_BG));
         frame.render_widget(msg, inner);
         return;
@@ -1013,54 +1014,55 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let hints = if app.rename_input.is_some() {
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 決定  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Confirm  ", Style::default().fg(TEXT_DIM)),
             Span::styled("Esc", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 取消  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("空Enter", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 元に戻す", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Cancel  ", Style::default().fg(TEXT_DIM)),
+            Span::styled("Empty Enter", Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Reset", Style::default().fg(TEXT_DIM)),
         ])
-    } else { match focus {
+    } else {
+        let kb = &app.config.keybindings;
+        match focus {
         FocusTarget::Preview => Line::from(vec![
-            Span::styled(" Scroll", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" スクロール  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^W", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 閉じる  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^P", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 配置替  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^Q", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 終了", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Scroll  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(format!(" {}", keybinding::keybinding_display(&kb.pane_close)), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Close  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.preview_swap), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Swap  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.quit), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Quit", Style::default().fg(TEXT_DIM)),
         ]),
         FocusTarget::FileTree => Line::from(vec![
             Span::styled(" j/k", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 移動  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Move  ", Style::default().fg(TEXT_DIM)),
             Span::styled("Enter", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 開く  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Open  ", Style::default().fg(TEXT_DIM)),
             Span::styled(".", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 隠しファイル  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Hidden  ", Style::default().fg(TEXT_DIM)),
             Span::styled("Esc", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 戻る  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^F", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 閉じる  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^Q", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 終了", Style::default().fg(TEXT_DIM)),
+            Span::styled(" Back  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.file_tree), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Close  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.quit), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Quit", Style::default().fg(TEXT_DIM)),
         ]),
         FocusTarget::Pane => Line::from(vec![
-            Span::styled(" ^D", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 縦分割  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^E", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 横分割  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^W", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 閉じる  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("A-T", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 新タブ  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("A-R", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" タブ名  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^F", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" ツリー  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^P", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 配置替  ", Style::default().fg(TEXT_DIM)),
-            Span::styled("^Q", Style::default().fg(ACCENT_BLUE)),
-            Span::styled(" 終了", Style::default().fg(TEXT_DIM)),
+            Span::styled(format!(" {}", keybinding::keybinding_display(&kb.split_vertical)), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" VSplit  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.split_horizontal), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" HSplit  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.pane_close), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Close  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.tab_new), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" New Tab  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.tab_rename), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Rename  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.file_tree), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Tree  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.preview_swap), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Swap  ", Style::default().fg(TEXT_DIM)),
+            Span::styled(keybinding::keybinding_display(&kb.quit), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Quit", Style::default().fg(TEXT_DIM)),
         ]),
     }};
 
@@ -1525,7 +1527,7 @@ fn render_settings_panel(app: &App, frame: &mut Frame, area: Rect) {
     let selected = app.settings_panel.selected;
 
     let outer_block = Block::default()
-        .title(" \u{2699} 設定パネル ")
+        .title(" \u{2699} Settings ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1580,7 +1582,7 @@ fn render_settings_panel(app: &App, frame: &mut Frame, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k: 移動  Enter: 編集  q: 閉じる",
+        " j/k: Move  Enter: Edit  q: Close",
         Style::default().fg(TEXT_DIM),
     )));
 
@@ -1708,7 +1710,7 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, dialog_rect);
 
     let outer_block = Block::default()
-        .title(" ペイン一覧 ")
+        .title(" Pane List ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1770,7 +1772,7 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k:移動  Enter:選択  Esc:閉じる",
+        " j/k: Move  Enter: Select  Esc: Close",
         Style::default().fg(TEXT_DIM),
     )));
 
@@ -1789,7 +1791,7 @@ fn render_filetree_action_popup(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
-        .title(" ファイルを開く ")
+        .title(" Open File ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1799,8 +1801,8 @@ fn render_filetree_action_popup(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, popup_area);
 
     let options = [
-        "プレビュー",
-        "エディタで開く",
+        "Preview",
+        "Open in Editor",
     ];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -1825,7 +1827,7 @@ fn render_filetree_action_popup(app: &App, frame: &mut Frame, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " Enter:選択  Esc:閉じる",
+        " Enter: Select  Esc: Close",
         Style::default().fg(TEXT_DIM),
     )));
 

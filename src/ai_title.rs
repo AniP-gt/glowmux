@@ -52,6 +52,7 @@ pub fn is_noise_line(line: &str) -> bool {
 pub async fn generate_title(
     pane_output: &str,
     config: &AiTitleEngineConfig,
+    prompt_template: &str,
     ollama_url: &str,
     ollama_model: &str,
     gemini_api_key: &str,
@@ -73,11 +74,7 @@ pub async fn generate_title(
     };
 
     let max = config.max_chars;
-    let prompt = format!(
-        "以下はターミナルセッションの出力です。\
-このセッションで何をしているか、{max}文字以内の日本語で端的に答えてください。\
-タイトルのみ返し、句読点・引用符・説明文は不要です。\n\n{sanitized}"
-    );
+    let prompt = format!("{}\n\n{sanitized}", prompt_template);
 
     let backend = AiTitleBackend::from_str(&config.backend);
 
