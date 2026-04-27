@@ -25,8 +25,8 @@ pub enum AppEvent {
     CwdChanged(usize, PathBuf),
     /// Hook event received from Unix socket server.
     HookReceived { pane_id: usize, event: HookEvent },
-    /// AI title generation completed.
-    AiTitleGenerated { pane_id: usize, title: String },
+    /// AI title generation completed (None = generation failed/timed out).
+    AiTitleGenerated { pane_id: usize, title: Option<String> },
     /// AI branch name generation completed.
     BranchNameGenerated { branch: String },
     /// Async worktree creation completed successfully.
@@ -628,6 +628,7 @@ pub struct App {
     pub status_flash: Option<(String, std::time::Instant)>,
     pub pane_output_rings: HashMap<usize, VecDeque<String>>,
     pub last_ai_title_request: HashMap<usize, Instant>,
+    pub ai_title_in_flight: std::collections::HashSet<usize>,
     pub ai_titles: HashMap<usize, String>,
     pub tokio_handle: Option<tokio::runtime::Handle>,
     pub pane_create_dialog: PaneCreateDialog,
@@ -709,6 +710,7 @@ impl App {
             status_flash: None,
             pane_output_rings: HashMap::new(),
             last_ai_title_request: HashMap::new(),
+            ai_title_in_flight: std::collections::HashSet::new(),
             ai_titles: HashMap::new(),
             tokio_handle: None,
             pane_create_dialog: PaneCreateDialog {
@@ -1561,6 +1563,7 @@ impl App {
         self.pane_output_rings.remove(&focused);
         self.ai_titles.remove(&focused);
         self.last_ai_title_request.remove(&focused);
+        self.ai_title_in_flight.remove(&focused);
         let ws = self.ws_mut();
 
         let remaining_ids = ws.layout.collect_pane_ids();
@@ -3561,9 +3564,8 @@ impl App {
                                             let gemini_api_key = self.config.ai.gemini.api_key.clone();
                                             let gemini_model = self.config.ai.gemini.model.clone();
                                             handle.spawn(async move {
-                                                if let Some(title) = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
-                                                    let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
-                                                }
+                                                let title = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await;
+                                                let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                             });
                                         }
                                     }
@@ -3603,9 +3605,8 @@ impl App {
                                                     let gemini_api_key = self.config.ai.gemini.api_key.clone();
                                                     let gemini_model = self.config.ai.gemini.model.clone();
                                                     handle.spawn(async move {
-                                                        if let Some(title) = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await {
-                                                            let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
-                                                        }
+                                                        let title = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await;
+                                                        let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
                                                     });
                                                 }
                                             }
@@ -3625,7 +3626,10 @@ impl App {
                     }
                 }
                 AppEvent::AiTitleGenerated { pane_id, title } => {
-                    self.ai_titles.insert(pane_id, title);
+                    self.ai_title_in_flight.remove(&pane_id);
+                    if let Some(t) = title {
+                        self.ai_titles.insert(pane_id, t);
+                    }
                 }
                 AppEvent::BranchNameGenerated { branch } => {
                     self.pane_create_dialog.generating_name = false;
