@@ -1267,7 +1267,7 @@ impl App {
                 self.ws_mut().file_tree.move_up();
                 Ok(true)
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('o') => {
                 let path = self.ws_mut().file_tree.toggle_or_select();
                 if let Some(path) = path {
                     match self.config.filetree.enter_action.as_str() {
