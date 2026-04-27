@@ -3546,10 +3546,11 @@ impl App {
                         // that don't send HookEvent::Stop)
                         if shell_prompt_seen {
                             let interval = self.config.ai_title_engine.update_interval_sec;
-                            let should_request = self.last_ai_title_request
-                                .get(&pane_id)
-                                .map(|t| t.elapsed().as_secs() >= interval)
-                                .unwrap_or(true);
+                            let should_request = !self.ai_title_in_flight.contains(&pane_id)
+                                && self.last_ai_title_request
+                                    .get(&pane_id)
+                                    .map(|t| t.elapsed().as_secs() >= interval)
+                                    .unwrap_or(true);
                             if should_request {
                                 if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                     if !ring.is_empty() {
@@ -3557,6 +3558,7 @@ impl App {
                                         let tx = self.event_tx.clone();
                                         if let Some(handle) = &self.tokio_handle {
                                             self.last_ai_title_request.insert(pane_id, Instant::now());
+                                            self.ai_title_in_flight.insert(pane_id);
                                             let config = self.config.ai_title_engine.clone();
                                             let prompt_template = self.config.ai.title.prompt.clone();
                                             let ollama_url = self.config.ai.ollama.base_url.clone();
@@ -3587,10 +3589,11 @@ impl App {
                                 // Claude Code returned to prompt — good time to generate title
                                 if self.ai_title_enabled {
                                     let interval = self.config.ai_title_engine.update_interval_sec;
-                                    let should_request = self.last_ai_title_request
-                                        .get(&pane_id)
-                                        .map(|t| t.elapsed().as_secs() >= interval)
-                                        .unwrap_or(true);
+                                    let should_request = !self.ai_title_in_flight.contains(&pane_id)
+                                        && self.last_ai_title_request
+                                            .get(&pane_id)
+                                            .map(|t| t.elapsed().as_secs() >= interval)
+                                            .unwrap_or(true);
                                     if should_request {
                                         if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                             if !ring.is_empty() {
@@ -3598,6 +3601,7 @@ impl App {
                                                 let tx = self.event_tx.clone();
                                                 if let Some(handle) = &self.tokio_handle {
                                                     self.last_ai_title_request.insert(pane_id, Instant::now());
+                                                    self.ai_title_in_flight.insert(pane_id);
                                                     let config = self.config.ai_title_engine.clone();
                                                     let prompt_template = self.config.ai.title.prompt.clone();
                                                     let ollama_url = self.config.ai.ollama.base_url.clone();
