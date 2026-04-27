@@ -67,8 +67,8 @@ pub async fn generate_title(
         .chars()
         .filter(|c| !c.is_control() || *c == '\n')
         .collect();
-    let sanitized = if sanitized.len() > 3000 {
-        sanitized[sanitized.len() - 3000..].to_string()
+    let sanitized = if sanitized.chars().count() > 3000 {
+        sanitized.chars().rev().take(3000).collect::<String>().chars().rev().collect::<String>()
     } else {
         sanitized
     };
