@@ -925,7 +925,10 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else if self.key_matches(key, &self.config.keybindings.quit) {
+                } else if crate::keybinding::parse_keybinding(&self.config.keybindings.quit)
+                    .map(|(_, code)| key.code == code)
+                    .unwrap_or(false)
+                {
                     self.should_quit = true;
                     return Ok(true);
                 } else if crate::keybinding::parse_keybinding(&self.config.keybindings.layout_cycle)
