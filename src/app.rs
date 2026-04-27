@@ -628,6 +628,7 @@ pub struct App {
     pub status_flash: Option<(String, std::time::Instant)>,
     pub pane_output_rings: HashMap<usize, VecDeque<String>>,
     pub last_ai_title_request: HashMap<usize, Instant>,
+    pub ai_title_requested_once: std::collections::HashSet<usize>,
     pub ai_title_in_flight: std::collections::HashSet<usize>,
     pub ai_titles: HashMap<usize, String>,
     pub tokio_handle: Option<tokio::runtime::Handle>,
@@ -712,6 +713,7 @@ impl App {
             status_flash: None,
             pane_output_rings: HashMap::new(),
             last_ai_title_request: HashMap::new(),
+            ai_title_requested_once: std::collections::HashSet::new(),
             ai_title_in_flight: std::collections::HashSet::new(),
             ai_titles: HashMap::new(),
             tokio_handle: None,
@@ -1510,14 +1512,23 @@ impl App {
         Ok(())
     }
 
+    fn cleanup_pane_runtime_state(&mut self, pane_id: usize) {
+        self.claude_monitor.remove(pane_id);
+        self.pane_states.remove(&pane_id);
+        self.pane_output_rings.remove(&pane_id);
+        self.ai_title_requested_once.remove(&pane_id);
+        self.ai_titles.remove(&pane_id);
+        self.last_ai_title_request.remove(&pane_id);
+        self.ai_title_in_flight.remove(&pane_id);
+    }
+
     fn close_tab(&mut self, index: usize) {
         if self.workspaces.len() <= 1 {
             return;
         }
-        // Clean up claude monitor state for all panes in this tab
         let pane_ids: Vec<usize> = self.workspaces[index].panes.keys().copied().collect();
         for pane_id in pane_ids {
-            self.claude_monitor.remove(pane_id);
+            self.cleanup_pane_runtime_state(pane_id);
         }
         self.workspaces[index].shutdown();
         self.workspaces.remove(index);
@@ -1632,13 +1643,7 @@ impl App {
             pane.kill();
         }
 
-        // Clean up state maps for this pane
-        self.claude_monitor.remove(focused);
-        self.pane_states.remove(&focused);
-        self.pane_output_rings.remove(&focused);
-        self.ai_titles.remove(&focused);
-        self.last_ai_title_request.remove(&focused);
-        self.ai_title_in_flight.remove(&focused);
+        self.cleanup_pane_runtime_state(focused);
         let ws = self.ws_mut();
 
         let remaining_ids = ws.layout.collect_pane_ids();
@@ -3602,6 +3607,10 @@ impl App {
                     }
                 }
                 AppEvent::PtyOutput { pane_id, lines } => {
+                    if self.find_pane(pane_id).is_none() {
+                        self.cleanup_pane_runtime_state(pane_id);
+                        continue;
+                    }
                     // Accumulate meaningful lines into the ring buffer.
                     // Filter out Claude Code UI noise lines (bypass/status bars).
                     if self.ai_title_enabled && !lines.is_empty() {
@@ -3626,17 +3635,19 @@ impl App {
                         // that don't send HookEvent::Stop)
                         if shell_prompt_seen {
                             let interval = self.config.ai_title_engine.update_interval_sec;
-                            let should_request = !self.ai_title_in_flight.contains(&pane_id)
-                                && self.last_ai_title_request
-                                    .get(&pane_id)
-                                    .map(|t| t.elapsed().as_secs() >= interval)
-                                    .unwrap_or(true);
+                            let should_request = should_request_ai_title(
+                                self.ai_title_requested_once.contains(&pane_id),
+                                self.ai_title_in_flight.contains(&pane_id),
+                                self.last_ai_title_request.get(&pane_id).copied(),
+                                interval,
+                            );
                             if should_request {
                                 if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                     if !ring.is_empty() {
                                         let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
                                         let tx = self.event_tx.clone();
                                         if let Some(handle) = &self.tokio_handle {
+                                            self.ai_title_requested_once.insert(pane_id);
                                             self.last_ai_title_request.insert(pane_id, Instant::now());
                                             self.ai_title_in_flight.insert(pane_id);
                                             let config = self.config.ai_title_engine.clone();
@@ -3669,17 +3680,19 @@ impl App {
                                 // Claude Code returned to prompt — good time to generate title
                                 if self.ai_title_enabled {
                                     let interval = self.config.ai_title_engine.update_interval_sec;
-                                    let should_request = !self.ai_title_in_flight.contains(&pane_id)
-                                        && self.last_ai_title_request
-                                            .get(&pane_id)
-                                            .map(|t| t.elapsed().as_secs() >= interval)
-                                            .unwrap_or(true);
+                                    let should_request = should_request_ai_title(
+                                        self.ai_title_requested_once.contains(&pane_id),
+                                        self.ai_title_in_flight.contains(&pane_id),
+                                        self.last_ai_title_request.get(&pane_id).copied(),
+                                        interval,
+                                    );
                                     if should_request {
                                         if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                             if !ring.is_empty() {
                                                 let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
                                                 let tx = self.event_tx.clone();
                                                 if let Some(handle) = &self.tokio_handle {
+                                                    self.ai_title_requested_once.insert(pane_id);
                                                     self.last_ai_title_request.insert(pane_id, Instant::now());
                                                     self.ai_title_in_flight.insert(pane_id);
                                                     let config = self.config.ai_title_engine.clone();
@@ -3710,6 +3723,10 @@ impl App {
                     }
                 }
                 AppEvent::AiTitleGenerated { pane_id, title } => {
+                    if self.find_pane(pane_id).is_none() {
+                        self.cleanup_pane_runtime_state(pane_id);
+                        continue;
+                    }
                     self.ai_title_in_flight.remove(&pane_id);
                     if let Some(t) = title {
                         self.ai_titles.insert(pane_id, t);
@@ -3871,6 +3888,19 @@ fn dir_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+fn should_request_ai_title(
+    already_requested_once: bool,
+    in_flight: bool,
+    last_request: Option<Instant>,
+    interval_secs: u64,
+) -> bool {
+    !already_requested_once
+        && !in_flight
+        && last_request
+            .map(|t| t.elapsed().as_secs() >= interval_secs)
+            .unwrap_or(true)
+}
+
 fn restore_session_workspaces(
     app: &mut App,
     session: &crate::session::SessionData,
@@ -3906,6 +3936,7 @@ fn restore_session_workspaces(
         app.workspaces.push(ws);
 
         if !first_pane.title.is_empty() {
+            app.ai_title_requested_once.insert(pane_id);
             app.ai_titles.insert(pane_id, first_pane.title.clone());
         }
 
@@ -3919,6 +3950,7 @@ fn restore_session_workspaces(
             ws.panes.insert(new_pane_id, pane);
             ws.layout.split_pane(focused, new_pane_id, SplitDirection::Vertical);
             if !pane_snap.title.is_empty() {
+                app.ai_title_requested_once.insert(new_pane_id);
                 app.ai_titles.insert(new_pane_id, pane_snap.title.clone());
             }
         }
@@ -4068,6 +4100,31 @@ fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_should_request_ai_title_allows_first_generation() {
+        assert!(should_request_ai_title(false, false, None, 30));
+    }
+
+    #[test]
+    fn test_should_request_ai_title_blocks_when_already_requested_once() {
+        assert!(!should_request_ai_title(true, false, None, 30));
+    }
+
+    #[test]
+    fn test_should_request_ai_title_blocks_when_in_flight() {
+        assert!(!should_request_ai_title(false, true, None, 30));
+    }
+
+    #[test]
+    fn test_should_request_ai_title_respects_interval() {
+        let recent = Instant::now();
+        let old = Instant::now() - Duration::from_secs(31);
+
+        assert!(!should_request_ai_title(false, false, Some(recent), 30));
+        assert!(should_request_ai_title(false, false, Some(old), 30));
+    }
 
     #[test]
     fn test_layout_single_pane() {
