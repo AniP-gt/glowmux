@@ -504,13 +504,13 @@ fn find_jsonl_path(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Encode a path to Claude's project name format.
-/// Claude Code replaces any character that is not ASCII alphanumeric or `.` with `-`.
-/// E.g.,  `C:\Users\じゅぶ\dev` → `C--Users-----dev`
+/// Claude Code replaces any character that is not ASCII alphanumeric with `-`.
+/// E.g., `/Users/tk/workspace/github.com/foo` → `-Users-tk-workspace-github-com-foo`
 fn encode_cwd_to_project_name(cwd: &Path) -> String {
     let s = cwd.to_string_lossy();
     let mut result = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' {
+        if ch.is_ascii_alphanumeric() {
             result.push(ch);
         } else {
             result.push('-');
@@ -531,12 +531,18 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_cwd_dot_in_path() {
+        // Dots (e.g. in "github.com") are encoded as dashes, matching Claude Code's behaviour.
+        let path = PathBuf::from("/Users/tk/workspace/github.com/foo/bar");
+        let encoded = encode_cwd_to_project_name(&path);
+        assert_eq!(encoded, "-Users-tk-workspace-github-com-foo-bar");
+    }
+
+    #[test]
     fn test_encode_cwd_japanese() {
         // Claude encodes non-ASCII chars as dashes too
         let path = PathBuf::from("C:\\Users\\じゅぶ\\dev\\ccmux");
         let encoded = encode_cwd_to_project_name(&path);
-        // C : \ U s e r s \ じ ゅ ぶ \ d e v \ c c m u x
-        // C - - Users    - - - - dev - ccmux
         assert_eq!(encoded, "C--Users-----dev-ccmux");
     }
 
