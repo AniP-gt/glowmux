@@ -1634,7 +1634,7 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
     // Sized to fit features + divider + cheatsheet + 3 lines of chrome (title,
     // separator, hints). Capped to area height so it never overflows.
     let dialog_width = 56u16;
-    let content_lines = (FEATURES.len() + cheatsheet.len() + 4) as u16;
+    let content_lines = (FEATURES.len() + cheatsheet.len() + 10) as u16;
     let dialog_height = content_lines.saturating_add(3).min(area.height);
 
     let x = area.x + area.width.saturating_sub(dialog_width) / 2;
@@ -1705,9 +1705,32 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
         ]));
     }
 
+    // Prefix operations subsection
+    let prefix_display = keybinding::keybinding_display(kb.prefix.as_str());
+    let quit_display = keybinding::keybinding_display(kb.quit.as_str());
+    let layout_cycle_display = keybinding::keybinding_display(kb.layout_cycle.as_str());
+    let prefix_ops: &[(&str, &str)] = &[
+        (&quit_display, "quit"),
+        (&layout_cycle_display, "layout cycle"),
+        ("[", "copy mode"),
+        ("w", "pane list"),
+    ];
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k: move  Space: toggle  Enter/q: apply  Esc: cancel",
+        " Prefix operations",
+        Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD),
+    )));
+    for (key, action) in prefix_ops {
+        let combo = format!("{}+{}", prefix_display, key);
+        lines.push(Line::from(vec![
+            Span::styled(format!("   {:<14}", combo), Style::default().fg(ACCENT_BLUE)),
+            Span::styled(action.to_string(), Style::default().fg(TEXT_DIM)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k: scroll  Space: toggle  Enter/q: apply  Esc: cancel",
         Style::default().fg(TEXT_DIM),
     )));
 
