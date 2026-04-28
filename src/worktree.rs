@@ -50,10 +50,7 @@ impl WorktreeManager {
         // interpreted as git flags (anything with `--`, spaces, etc.) before
         // they ever reach the git CLI.
         if !opts.base_branch.is_empty() && !validate_branch_name(&opts.base_branch) {
-            return Err(anyhow::anyhow!(
-                "Invalid base branch: {}",
-                opts.base_branch
-            ));
+            return Err(anyhow::anyhow!("Invalid base branch: {}", opts.base_branch));
         }
 
         let use_gwq = opts.prefer_gwq && self.gwq_available;
@@ -82,8 +79,12 @@ impl WorktreeManager {
             return Err(anyhow::anyhow!("Refusing to remove root or empty path"));
         }
         // Validate the path is under the repo root to prevent removing arbitrary dirs
-        let real_root = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
-        let real_path = worktree_path.canonicalize().unwrap_or_else(|_| worktree_path.to_path_buf());
+        let real_root = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
+        let real_path = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
         if !real_path.starts_with(&real_root) {
             return Err(anyhow::anyhow!(
                 "Refusing to remove path outside repo root: {}",
@@ -138,7 +139,9 @@ fn parse_worktree_list(text: &str) -> Vec<WorktreeInfo> {
     for line in text.lines() {
         if let Some(path_str) = line.strip_prefix("worktree ") {
             if let Some(path) = current_path.take() {
-                let branch = current_branch.take().unwrap_or_else(|| "(unknown)".to_string());
+                let branch = current_branch
+                    .take()
+                    .unwrap_or_else(|| "(unknown)".to_string());
                 result.push(WorktreeInfo {
                     path,
                     branch,
@@ -204,8 +207,12 @@ fn create_with_gwq(repo_root: &Path, branch_name: &str) -> Result<PathBuf> {
             return Err(anyhow::anyhow!("gwq returned path with invalid characters"));
         }
         let candidate = PathBuf::from(path_str);
-        let real_root = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
-        let real_candidate = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+        let real_root = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
+        let real_candidate = candidate
+            .canonicalize()
+            .unwrap_or_else(|_| candidate.clone());
         if real_candidate.starts_with(&real_root) {
             return Ok(candidate);
         }
@@ -382,7 +389,11 @@ branch refs/heads/feat/new-thing
         ensure_glowmux_in_exclude(&tmp, ".glowmux");
         let content2 = std::fs::read_to_string(tmp.join(".git/info/exclude")).unwrap();
         let count = content2.matches(".glowmux/").count();
-        assert_eq!(count, 1, "second call should be a no-op, got {} occurrences", count);
+        assert_eq!(
+            count, 1,
+            "second call should be a no-op, got {} occurrences",
+            count
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 

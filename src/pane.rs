@@ -42,7 +42,13 @@ impl Pane {
         Self::new_with_cwd(id, rows, cols, event_tx, None)
     }
 
-    pub fn new_with_cwd(id: usize, rows: u16, cols: u16, event_tx: Sender<AppEvent>, cwd: Option<PathBuf>) -> Result<Self> {
+    pub fn new_with_cwd(
+        id: usize,
+        rows: u16,
+        cols: u16,
+        event_tx: Sender<AppEvent>,
+        cwd: Option<PathBuf>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let pty_size = PtySize {
@@ -52,9 +58,7 @@ impl Pane {
             pixel_height: 0,
         };
 
-        let pair = pty_system
-            .openpty(pty_size)
-            .context("Failed to open PTY")?;
+        let pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
         let shell = detect_shell();
         let mut cmd = CommandBuilder::new(&shell);
@@ -68,7 +72,8 @@ impl Pane {
             cmd.arg("--login");
         }
 
-        let work_dir = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let work_dir =
+            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         cmd.cwd(&work_dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("GLOWMUX", "1"); // marker to detect nested glowmux
@@ -104,7 +109,14 @@ impl Pane {
             .name(format!("pty-reader-{}", id))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    pty_reader_thread(reader, parser_clone, title_clone, scrollback_clone, id, event_tx);
+                    pty_reader_thread(
+                        reader,
+                        parser_clone,
+                        title_clone,
+                        scrollback_clone,
+                        id,
+                        event_tx,
+                    );
                 }));
                 if let Err(e) = result {
                     let msg = if let Some(s) = e.downcast_ref::<&str>() {
@@ -133,7 +145,10 @@ impl Pane {
                         WriterMsg::Shutdown => break,
                         WriterMsg::Data(chunk) => {
                             if w.write_all(&chunk).is_err() || w.flush().is_err() {
-                                crate::log::write_log("WARN", &format!("pane {} writer: PTY write failed, stopping", id));
+                                crate::log::write_log(
+                                    "WARN",
+                                    &format!("pane {} writer: PTY write failed, stopping", id),
+                                );
                                 break;
                             }
                         }
@@ -266,7 +281,9 @@ impl Pane {
         let current = screen.scrollback();
         // Estimate max by checking: set_scrollback clamps to actual scrollback length
         // We can't query it directly, so use the stored total_scrollback as estimate
-        let total = self.total_scrollback.load(std::sync::atomic::Ordering::Relaxed);
+        let total = self
+            .total_scrollback
+            .load(std::sync::atomic::Ordering::Relaxed);
         (current, total)
     }
 
@@ -274,7 +291,9 @@ impl Pane {
     pub fn scroll_down(&self, lines: usize) {
         let mut parser = self.parser.lock().unwrap_or_else(|e| e.into_inner());
         let current = parser.screen().scrollback();
-        parser.screen_mut().set_scrollback(current.saturating_sub(lines));
+        parser
+            .screen_mut()
+            .set_scrollback(current.saturating_sub(lines));
     }
 
     /// Reset scroll to the bottom (live view).
@@ -395,18 +414,27 @@ fn extract_printable_lines(data: &[u8]) -> Vec<String> {
                     chars.next();
                     // CSI: consume until a byte in 0x40–0x7E
                     for ch in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&ch) { break; }
+                        if ('\x40'..='\x7e').contains(&ch) {
+                            break;
+                        }
                     }
                 }
                 Some(']') => {
                     chars.next();
                     // OSC: consume until BEL or ESC backslash
                     while let Some(ch) = chars.next() {
-                        if ch == '\x07' { break; }
-                        if ch == '\x1b' { chars.next(); break; } // ESC \
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' {
+                            chars.next();
+                            break;
+                        } // ESC \
                     }
                 }
-                _ => { chars.next(); } // ESC + single char
+                _ => {
+                    chars.next();
+                } // ESC + single char
             }
         } else if c == '\r' {
             // ignore CR
@@ -440,8 +468,7 @@ fn extract_osc7(data: &[u8]) -> Option<PathBuf> {
     let rest = &s[start + marker.len()..];
 
     // Find the terminator: BEL (\x07) or ST (\x1b\\)
-    let end = rest.find('\x07')
-        .or_else(|| rest.find("\x1b\\"));
+    let end = rest.find('\x07').or_else(|| rest.find("\x1b\\"));
 
     let uri = &rest[..end?];
 
@@ -489,8 +516,7 @@ fn extract_osc_title(data: &[u8]) -> Option<String> {
     for marker in &["\x1b]0;", "\x1b]2;"] {
         if let Some(start) = s.find(marker) {
             let rest = &s[start + marker.len()..];
-            let end = rest.find('\x07')
-                .or_else(|| rest.find("\x1b\\"));
+            let end = rest.find('\x07').or_else(|| rest.find("\x1b\\"));
             if let Some(end) = end {
                 return Some(rest[..end].to_string());
             }
@@ -527,10 +553,7 @@ fn detect_shell_windows() -> PathBuf {
     }
 
     // Try bash in PATH
-    if let Ok(output) = std::process::Command::new("where")
-        .arg("bash")
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("where").arg("bash").output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = stdout.lines().next() {

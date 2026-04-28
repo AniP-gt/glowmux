@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const GIT_STATUS_ARGS: [&str; 3] = ["status", "--porcelain=v1", "--ignored"];
+const GIT_STATUS_ARGS: [&str; 2] = ["status", "--porcelain=v1"];
 const GIT_STATUS_UNTRACKED_ARG: &str = "--untracked-files=normal";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

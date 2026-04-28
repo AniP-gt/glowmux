@@ -48,7 +48,12 @@ impl FileEntry {
 /// Maximum entries per directory to prevent DoS from huge directories.
 const MAX_ENTRIES_PER_DIR: usize = 500;
 
-fn scan_directory_filtered(path: &Path, depth: usize, max_depth: usize, show_hidden: bool) -> Vec<FileEntry> {
+fn scan_directory_filtered(
+    path: &Path,
+    depth: usize,
+    max_depth: usize,
+    show_hidden: bool,
+) -> Vec<FileEntry> {
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -64,10 +69,7 @@ fn scan_directory_filtered(path: &Path, depth: usize, max_depth: usize, show_hid
         }
 
         let entry_path = entry.path();
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let name = entry.file_name().to_string_lossy().to_string();
 
         // Always skip .git (too large and noisy)
         if name == ".git" {
@@ -241,7 +243,12 @@ impl FileTree {
         if entry.path == path && entry.is_dir {
             entry.is_expanded = !entry.is_expanded;
             if entry.is_expanded && entry.children.is_empty() {
-                entry.children = scan_directory_filtered(&entry.path, entry.depth + 1, entry.depth + 2, show_hidden);
+                entry.children = scan_directory_filtered(
+                    &entry.path,
+                    entry.depth + 1,
+                    entry.depth + 2,
+                    show_hidden,
+                );
             }
             return true;
         }
@@ -254,15 +261,20 @@ impl FileTree {
     }
 
     /// Check if it's time to auto-refresh and do so if needed.
-    /// Returns true if the tree was updated.
+    /// Returns true only if the tree actually changed (new/modified/deleted entries).
     pub fn auto_refresh_if_needed(&mut self) -> bool {
         if self.last_refresh.elapsed().as_secs() < AUTO_REFRESH_INTERVAL_SECS {
             return false;
         }
         self.last_refresh = Instant::now();
 
+        // Capture current state for change detection
+        let old_flat_len = self.flat_entries.len();
+        let old_flat_paths: Vec<_> = self.flat_entries.iter().map(|e| e.path.clone()).collect();
+
         // Remember the selected path so we can restore selection after rescan.
-        let selected_path = self.flat_entries
+        let selected_path = self
+            .flat_entries
             .get(self.selected_index)
             .map(|e| e.path.clone());
 
@@ -284,11 +296,23 @@ impl FileTree {
             self.selected_index = self.flat_entries.len().saturating_sub(1);
         }
 
-        true
+        // Detect if anything actually changed
+        let new_flat_paths: Vec<_> = self.flat_entries.iter().map(|e| e.path.clone()).collect();
+        let changed = new_flat_paths.len() != old_flat_len
+            || new_flat_paths
+                .iter()
+                .zip(old_flat_paths.iter())
+                .any(|(n, o)| n != o);
+
+        changed
     }
 
     /// Merge new scan results with existing entries, preserving expanded state.
-    fn merge_entries(mut old: Vec<FileEntry>, new: Vec<FileEntry>, show_hidden: bool) -> Vec<FileEntry> {
+    fn merge_entries(
+        mut old: Vec<FileEntry>,
+        new: Vec<FileEntry>,
+        show_hidden: bool,
+    ) -> Vec<FileEntry> {
         new.into_iter()
             .map(|mut new_entry| {
                 if new_entry.is_dir {
@@ -304,11 +328,8 @@ impl FileTree {
                                 new_entry.depth + 2,
                                 show_hidden,
                             );
-                            new_entry.children = Self::merge_entries(
-                                old_entry.children,
-                                new_children,
-                                show_hidden,
-                            );
+                            new_entry.children =
+                                Self::merge_entries(old_entry.children, new_children, show_hidden);
                         }
                     }
                 }
@@ -362,10 +383,7 @@ mod tests {
     fn test_scan_directory_skips_git() {
         let entries = scan_directory_filtered(Path::new("."), 0, 1, true);
         for entry in &entries {
-            assert!(
-                entry.name != ".git",
-                ".git should always be skipped"
-            );
+            assert!(entry.name != ".git", ".git should always be skipped");
         }
     }
 
