@@ -64,7 +64,11 @@ impl ClaudeState {
 
     /// Todo completion stats: (completed, total).
     pub fn todo_progress(&self) -> (usize, usize) {
-        let completed = self.todos.iter().filter(|t| t.status == "completed").count();
+        let completed = self
+            .todos
+            .iter()
+            .filter(|t| t.status == "completed")
+            .count();
         (completed, self.todos.len())
     }
 
@@ -116,6 +120,8 @@ impl ClaudeState {
 
 /// Per-pane monitor state.
 struct PaneMonitor {
+    bound_transcript_path: Option<PathBuf>,
+    session_id: Option<String>,
     jsonl_path: Option<PathBuf>,
     file_position: u64,
     last_mtime: Option<SystemTime>,
@@ -133,6 +139,8 @@ struct PaneMonitor {
 impl PaneMonitor {
     fn new() -> Self {
         Self {
+            bound_transcript_path: None,
+            session_id: None,
             jsonl_path: None,
             file_position: 0,
             last_mtime: None,
@@ -174,9 +182,41 @@ impl ClaudeMonitor {
             .unwrap_or_default()
     }
 
+    pub fn bind_session(
+        &self,
+        pane_id: usize,
+        transcript_path: Option<&Path>,
+        session_id: Option<&str>,
+    ) {
+        if let Ok(mut map) = self.inner.lock() {
+            let monitor = map.entry(pane_id).or_insert_with(PaneMonitor::new);
+            let next_session_id = session_id
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string);
+            let session_changed = next_session_id.as_deref() != monitor.session_id.as_deref();
+            if let Some(session_id) = next_session_id {
+                monitor.session_id = Some(session_id);
+            }
+
+            let next_path = transcript_path
+                .filter(|path| !path.as_os_str().is_empty())
+                .and_then(normalize_transcript_path_candidate);
+
+            if let Some(new_path) = next_path {
+                let path_changed = monitor.bound_transcript_path.as_ref() != Some(&new_path);
+                monitor.bound_transcript_path = Some(new_path.clone());
+                if path_changed || session_changed {
+                    reset_monitor_session(monitor, Some(new_path));
+                }
+            } else if session_changed {
+                reset_monitor_session(monitor, monitor.bound_transcript_path.clone());
+            }
+        }
+    }
+
     /// Update monitoring for a pane with its current cwd.
     /// Throttled to CHECK_INTERVAL to avoid per-frame syscalls.
-    pub fn update(&self, pane_id: usize, cwd: &Path) {
+    pub fn update(&self, pane_id: usize, cwd: &Path, allow_cwd_fallback: bool) {
         // Phase 1: check if we should run at all (short lock)
         let (path_to_read, read_from) = {
             let mut map = match self.inner.lock() {
@@ -192,36 +232,20 @@ impl ClaudeMonitor {
             }
             monitor.last_check = Instant::now();
 
-            // Locate or re-locate the JSONL file.
-            // Full directory scan every 5s or when our path disappears,
-            // to detect new sessions (new JSONL files).
-            let path_missing = monitor
-                .jsonl_path
-                .as_ref()
-                .is_none_or(|p| !p.exists());
-            let stale_scan = monitor.last_rescan.elapsed() > Duration::from_secs(5);
-            if path_missing || stale_scan {
-                monitor.last_rescan = Instant::now();
-                let expected_path = find_jsonl_path(cwd);
-                if monitor.jsonl_path != expected_path {
-                    monitor.jsonl_path = expected_path;
-                    monitor.file_position = 0;
-                    monitor.state = ClaudeState::default();
-                    monitor.active_task_ids.clear();
-                    monitor.counted_request_ids.clear();
-                }
-            }
-
-            let path = match &monitor.jsonl_path {
-                Some(p) => p.clone(),
+            let path = match resolve_monitor_path(monitor, cwd, allow_cwd_fallback) {
+                Some(path) => path,
                 None => return,
             };
 
-            // Check file metadata — skip if unchanged, detect truncation/rotation
-            let meta = match std::fs::metadata(&path) {
-                Ok(m) => m,
-                Err(_) => return,
+            let (path, meta) = match safe_transcript_file(&path) {
+                Some(result) => result,
+                None => return,
             };
+
+            if monitor.jsonl_path.as_ref() != Some(&path) {
+                reset_monitor_session(monitor, Some(path.clone()));
+            }
+
             let mtime = meta.modified().ok();
             if mtime == monitor.last_mtime {
                 return;
@@ -285,6 +309,104 @@ impl ClaudeMonitor {
             map.remove(&pane_id);
         }
     }
+
+    #[cfg(test)]
+    pub fn set_state_for_test(&self, pane_id: usize, state: ClaudeState) {
+        if let Ok(mut map) = self.inner.lock() {
+            let monitor = map.entry(pane_id).or_insert_with(PaneMonitor::new);
+            monitor.state = state;
+        }
+    }
+}
+
+fn default_transcript_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".claude").join("projects"))
+}
+
+fn normalize_transcript_path_candidate(path: &Path) -> Option<PathBuf> {
+    let transcript_root = default_transcript_root()?;
+    normalize_transcript_path_candidate_with_root(path, &transcript_root)
+}
+
+fn normalize_transcript_path_candidate_with_root(
+    path: &Path,
+    transcript_root: &Path,
+) -> Option<PathBuf> {
+    if !path.is_absolute() || path.extension()? != "jsonl" {
+        return None;
+    }
+
+    let canonical_root = transcript_root.canonicalize().ok()?;
+    let canonical_parent = path.parent()?.canonicalize().ok()?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return None;
+    }
+
+    Some(canonical_parent.join(path.file_name()?))
+}
+
+fn safe_transcript_file(path: &Path) -> Option<(PathBuf, std::fs::Metadata)> {
+    let transcript_root = default_transcript_root()?;
+    safe_transcript_file_with_root(path, &transcript_root)
+}
+
+fn safe_transcript_file_with_root(
+    path: &Path,
+    transcript_root: &Path,
+) -> Option<(PathBuf, std::fs::Metadata)> {
+    let normalized = normalize_transcript_path_candidate_with_root(path, transcript_root)?;
+    let file_type = std::fs::symlink_metadata(&normalized).ok()?.file_type();
+    if file_type.is_symlink() || !file_type.is_file() {
+        return None;
+    }
+
+    let metadata = std::fs::metadata(&normalized).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+
+    Some((normalized, metadata))
+}
+
+fn resolve_monitor_path(
+    monitor: &mut PaneMonitor,
+    cwd: &Path,
+    allow_cwd_fallback: bool,
+) -> Option<PathBuf> {
+    if let Some(bound_path) = monitor.bound_transcript_path.clone() {
+        if monitor.jsonl_path.as_ref() != Some(&bound_path) {
+            reset_monitor_session(monitor, Some(bound_path.clone()));
+        }
+        return Some(bound_path);
+    }
+
+    if !allow_cwd_fallback {
+        if monitor.jsonl_path.is_some() {
+            reset_monitor_session(monitor, None);
+        }
+        return None;
+    }
+
+    let path_missing = monitor.jsonl_path.as_ref().is_none_or(|p| !p.exists());
+    let stale_scan = monitor.last_rescan.elapsed() > Duration::from_secs(5);
+    if path_missing || stale_scan {
+        monitor.last_rescan = Instant::now();
+        let expected_path = find_jsonl_path(cwd);
+        if monitor.jsonl_path != expected_path {
+            reset_monitor_session(monitor, expected_path);
+        }
+    }
+
+    monitor.jsonl_path.clone()
+}
+
+fn reset_monitor_session(monitor: &mut PaneMonitor, jsonl_path: Option<PathBuf>) {
+    monitor.jsonl_path = jsonl_path;
+    monitor.file_position = 0;
+    monitor.last_mtime = None;
+    monitor.state = ClaudeState::default();
+    monitor.active_task_ids.clear();
+    monitor.counted_request_ids.clear();
 }
 
 /// Process a single JSONL line and update the monitor state.
@@ -317,7 +439,10 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
             }
 
             // Model name
-            if let Some(model) = message.and_then(|m| m.get("model")).and_then(|v| v.as_str()) {
+            if let Some(model) = message
+                .and_then(|m| m.get("model"))
+                .and_then(|v| v.as_str())
+            {
                 monitor.state.model = Some(model.to_string());
             }
 
@@ -342,8 +467,14 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
 
             if should_count {
                 if let Some(usage) = message.and_then(|m| m.get("usage")) {
-                    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let cache_read = usage
                         .get("cache_read_input_tokens")
                         .and_then(|v| v.as_u64())
@@ -385,9 +516,7 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
 
                             // Sub-agent tools (real name in JSONL is "Agent", "Task" was old name)
                             if name == "Agent" || name == "Task" {
-                                if let Some(task_id) =
-                                    block.get("id").and_then(|v| v.as_str())
-                                {
+                                if let Some(task_id) = block.get("id").and_then(|v| v.as_str()) {
                                     let subagent_type = block
                                         .get("input")
                                         .and_then(|i| i.get("subagent_type"))
@@ -397,8 +526,7 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
                                     monitor
                                         .active_task_ids
                                         .insert(task_id.to_string(), subagent_type);
-                                    monitor.state.subagent_count =
-                                        monitor.active_task_ids.len();
+                                    monitor.state.subagent_count = monitor.active_task_ids.len();
                                     monitor.state.subagent_types =
                                         monitor.active_task_ids.values().cloned().collect();
                                 }
@@ -415,14 +543,8 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
                                         .iter()
                                         .filter_map(|t| {
                                             Some(TodoItem {
-                                                content: t
-                                                    .get("content")?
-                                                    .as_str()?
-                                                    .to_string(),
-                                                status: t
-                                                    .get("status")?
-                                                    .as_str()?
-                                                    .to_string(),
+                                                content: t.get("content")?.as_str()?.to_string(),
+                                                status: t.get("status")?.as_str()?.to_string(),
                                             })
                                         })
                                         .collect();
@@ -446,8 +568,7 @@ fn process_event(monitor: &mut PaneMonitor, line: &str) {
                     if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
                         has_tool_result = true;
                         // If this tool_result is for a Task, decrement the active set
-                        if let Some(tool_use_id) =
-                            block.get("tool_use_id").and_then(|v| v.as_str())
+                        if let Some(tool_use_id) = block.get("tool_use_id").and_then(|v| v.as_str())
                         {
                             if monitor.active_task_ids.remove(tool_use_id).is_some() {
                                 monitor.state.subagent_count = monitor.active_task_ids.len();
@@ -583,6 +704,124 @@ mod tests {
         assert_eq!(monitor.state.input_tokens, 100);
         assert_eq!(monitor.state.output_tokens, 50);
         assert_eq!(monitor.state.cache_read_tokens, 1000);
+    }
+
+    #[test]
+    fn test_reset_monitor_session_clears_cached_state() {
+        let mut monitor = PaneMonitor::new();
+        monitor.file_position = 123;
+        monitor.last_mtime = Some(SystemTime::now());
+        monitor.state.output_tokens = 42;
+        monitor
+            .active_task_ids
+            .insert("task-1".to_string(), "explore".to_string());
+        monitor.counted_request_ids.insert("req-1".to_string());
+
+        reset_monitor_session(&mut monitor, Some(PathBuf::from("/tmp/session.jsonl")));
+
+        assert_eq!(
+            monitor.jsonl_path.as_deref(),
+            Some(Path::new("/tmp/session.jsonl"))
+        );
+        assert_eq!(monitor.file_position, 0);
+        assert!(monitor.last_mtime.is_none());
+        assert_eq!(monitor.state.total_tokens(), 0);
+        assert!(monitor.active_task_ids.is_empty());
+        assert!(monitor.counted_request_ids.is_empty());
+    }
+
+    #[test]
+    fn test_bind_session_persists_explicit_transcript_path() {
+        let monitor = ClaudeMonitor::new();
+        let root = default_transcript_root().unwrap().join(format!(
+            "glowmux-claude-monitor-bind-{}",
+            std::process::id()
+        ));
+        let project_dir = root.join("repo");
+        let transcript_path = project_dir.join("pane-a.jsonl");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(&transcript_path, b"").unwrap();
+
+        monitor.bind_session(7, Some(&transcript_path), Some("session-7"));
+
+        let normalized = normalize_transcript_path_candidate(&transcript_path).unwrap();
+
+        let inner = monitor.inner.lock().unwrap();
+        let pane = inner.get(&7).unwrap();
+        assert_eq!(
+            pane.bound_transcript_path.as_deref(),
+            Some(normalized.as_path())
+        );
+        assert_eq!(pane.session_id.as_deref(), Some("session-7"));
+        assert_eq!(pane.jsonl_path.as_deref(), Some(normalized.as_path()));
+
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_bind_session_ignores_missing_transcript_path() {
+        let monitor = ClaudeMonitor::new();
+
+        monitor.bind_session(3, None, Some("session-3"));
+
+        let inner = monitor.inner.lock().unwrap();
+        let pane = inner.get(&3).unwrap();
+        assert_eq!(pane.session_id.as_deref(), Some("session-3"));
+        assert!(pane.bound_transcript_path.is_none());
+        assert!(pane.jsonl_path.is_none());
+    }
+
+    #[test]
+    fn test_normalize_transcript_path_candidate_accepts_project_jsonl() {
+        let root = std::env::temp_dir().join(format!(
+            "glowmux-claude-monitor-accept-{}",
+            std::process::id()
+        ));
+        let project_dir = root.join("repo");
+        let transcript_path = project_dir.join("session.jsonl");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let normalized =
+            normalize_transcript_path_candidate_with_root(&transcript_path, &root).unwrap();
+
+        assert!(normalized.ends_with(Path::new("repo").join("session.jsonl")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_normalize_transcript_path_candidate_rejects_outside_root() {
+        let root = std::env::temp_dir().join(format!(
+            "glowmux-claude-monitor-reject-{}",
+            std::process::id()
+        ));
+        let outside_dir = std::env::temp_dir().join(format!(
+            "glowmux-claude-monitor-outside-{}",
+            std::process::id()
+        ));
+        let transcript_path = outside_dir.join("session.jsonl");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        assert!(normalize_transcript_path_candidate_with_root(&transcript_path, &root).is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn test_resolve_monitor_path_disables_unbound_cwd_fallback() {
+        let mut monitor = PaneMonitor::new();
+        monitor.jsonl_path = Some(PathBuf::from("/tmp/shared.jsonl"));
+        monitor.file_position = 123;
+        monitor.state.output_tokens = 42;
+
+        let resolved = resolve_monitor_path(&mut monitor, Path::new("/tmp/repo"), false);
+
+        assert!(resolved.is_none());
+        assert!(monitor.jsonl_path.is_none());
+        assert_eq!(monitor.file_position, 0);
+        assert_eq!(monitor.state.total_tokens(), 0);
     }
 
     #[test]
