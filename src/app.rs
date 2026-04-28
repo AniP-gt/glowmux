@@ -1867,10 +1867,18 @@ impl App {
     }
 
     fn reset_pane_list_sidebar_if_active(&mut self) {
-        let ws = self.ws_mut();
-        if ws.sidebar_mode == SidebarMode::PaneList {
-            ws.sidebar_mode = SidebarMode::None;
-            ws.focus_target = FocusTarget::Pane;
+        let was_active = {
+            let ws = self.ws_mut();
+            if ws.sidebar_mode == SidebarMode::PaneList {
+                ws.sidebar_mode = SidebarMode::None;
+                ws.focus_target = FocusTarget::Pane;
+                true
+            } else {
+                false
+            }
+        };
+        if was_active {
+            self.mark_layout_change();
         }
     }
 
