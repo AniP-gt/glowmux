@@ -6,7 +6,8 @@ use ratatui::Frame;
 
 use crate::app::{
     App, CloseConfirmDialog, CloseConfirmFocus, CopyModeState, DragTarget, FocusTarget,
-    PaneCreateDialog, PaneCreateField, PaneStatus, WorktreeCleanupDialog, FEATURES, SETTINGS_ITEMS,
+    PaneCreateDialog, PaneCreateField, PaneStatus, SidebarMode, WorktreeCleanupDialog, FEATURES,
+    SETTINGS_ITEMS,
 };
 use crate::keybinding;
 
@@ -82,7 +83,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let bg_block = Block::default().style(Style::default().bg(BG));
     frame.render_widget(bg_block, area);
 
-    let show_status = app.status_bar_visible || app.rename_input.is_some();
+    let show_status =
+        app.status_bar_visible || app.rename_input.is_some() || app.pane_rename_input.is_some();
     let status_h = if show_status { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -237,7 +239,7 @@ fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
     let tree_width = app.file_tree_width;
     let preview_width = app.preview_width;
 
-    let mut has_tree = app.ws().file_tree_visible;
+    let mut has_tree = app.ws().sidebar_mode != SidebarMode::None;
     let mut has_preview = app.ws().preview.is_active();
 
     let needed = MIN_PANE_AREA_WIDTH
@@ -273,8 +275,13 @@ fn render_main_area(app: &mut App, frame: &mut Frame, area: Rect) {
     let mut idx = 0;
 
     if has_tree {
-        app.ws_mut().last_file_tree_rect = Some(chunks[idx]);
-        render_file_tree(app, frame, chunks[idx]);
+        let sidebar_rect = chunks[idx];
+        app.ws_mut().last_file_tree_rect = Some(sidebar_rect);
+        match app.ws().sidebar_mode {
+            SidebarMode::FileTree => render_file_tree(app, frame, sidebar_rect),
+            SidebarMode::PaneList => render_pane_list_sidebar(app, frame, sidebar_rect),
+            SidebarMode::None => {}
+        }
         idx += 1;
     } else {
         app.ws_mut().last_file_tree_rect = None;
@@ -468,7 +475,14 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
             let claude_state = app.claude_monitor.state(pane_id);
             let pane_status = app.pane_status(pane_id);
             let dismissed = app.pane_state_dismissed(pane_id);
-            let ai_title = app.ai_titles.get(&pane_id).cloned();
+            let ai_title = app.pane_display_title(pane_id).map(|s| s.to_string());
+            let rename_buf = app.pane_rename_input.as_ref().and_then(|(id, buf)| {
+                if *id == pane_id {
+                    Some(buf.clone())
+                } else {
+                    None
+                }
+            });
             let pane_copy_mode = copy_mode.as_ref().filter(|c| c.pane_id == pane_id);
             render_single_pane(
                 pane,
@@ -483,6 +497,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
                 border_type,
                 &status_colors,
                 ai_title.as_deref(),
+                rename_buf.as_deref(),
                 pane_copy_mode,
                 frame,
                 rect,
@@ -580,6 +595,7 @@ fn render_single_pane(
     border_type: BorderType,
     status_colors: &StatusColors,
     ai_title: Option<&str>,
+    rename_cursor: Option<&str>,
     copy_mode: Option<&CopyModeState>,
     frame: &mut Frame,
     area: Rect,
@@ -597,22 +613,26 @@ fn render_single_pane(
     };
 
     let is_scrolled = pane.is_scrolled_back();
-    let base_label = if let Some(title) = ai_title {
-        title.to_string()
-    } else if is_claude {
-        "claude".to_string()
+    let label = if let Some(buf) = rename_cursor {
+        format!("{}\u{2588}", buf)
     } else {
-        "shell".to_string()
-    };
-    // Spec v5: append " ⌇ {branch}" to the pane title when a branch is bound.
-    // Truncate the base label first so the branch always fits within a sensible
-    // width budget — otherwise long AI titles can push the branch off-screen.
-    let label = match pane.branch_name.as_deref() {
-        Some(branch) if !branch.is_empty() => {
-            let truncated_base = truncate_to_width(&base_label, 24);
-            format!("{} \u{2307} {}", truncated_base, branch)
+        let base_label = if let Some(title) = ai_title {
+            title.to_string()
+        } else if is_claude {
+            "claude".to_string()
+        } else {
+            "shell".to_string()
+        };
+        // Spec v5: append " ⌇ {branch}" to the pane title when a branch is bound.
+        // Truncate the base label first so the branch always fits within a sensible
+        // width budget — otherwise long AI titles can push the branch off-screen.
+        match pane.branch_name.as_deref() {
+            Some(branch) if !branch.is_empty() => {
+                let truncated_base = truncate_to_width(&base_label, 24);
+                format!("{} \u{2307} {}", truncated_base, branch)
+            }
+            _ => base_label,
         }
-        _ => base_label,
     };
 
     let claude_suffix = if is_claude {
@@ -1233,7 +1253,10 @@ fn render_preview(app: &mut App, frame: &mut Frame, area: Rect) {
 // ─── Status bar (context-aware) ───────────────────────────
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    if !app.config.features.status_bar && app.rename_input.is_none() {
+    if !app.config.features.status_bar
+        && app.rename_input.is_none()
+        && app.pane_rename_input.is_none()
+    {
         let empty = Paragraph::new("").style(Style::default().bg(HEADER_BG));
         frame.render_widget(empty, area);
         return;
@@ -1241,7 +1264,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
 
     let focus = app.ws().focus_target;
 
-    let hints = if app.rename_input.is_some() {
+    let hints = if app.rename_input.is_some() || app.pane_rename_input.is_some() {
         Line::from(vec![
             Span::styled(" Enter", Style::default().fg(ACCENT_BLUE)),
             Span::styled(" Confirm  ", Style::default().fg(TEXT_DIM)),
@@ -1335,6 +1358,10 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 ),
                 Span::styled(" Quit", Style::default().fg(TEXT_DIM)),
             ]),
+            FocusTarget::PaneList => Line::from(vec![Span::styled(
+                " j/k: Move  Enter: Select  Esc: Close",
+                Style::default().fg(TEXT_DIM),
+            )]),
         }
     };
 
@@ -2133,6 +2160,105 @@ fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, inner);
 }
 
+fn build_pane_list_lines(app: &App, is_focused: bool) -> Vec<Line<'_>> {
+    let overlay = &app.pane_list_overlay;
+    let status_colors = StatusColors::from_config(&app.config.status);
+    let highlight_bg = if is_focused { FOCUS_BORDER } else { BORDER };
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, &pane_id) in overlay.pane_ids.iter().enumerate() {
+        let label = app
+            .pane_display_title(pane_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Pane {}", pane_id));
+
+        let dot_info: Option<(&str, Color)> = if app.config.features.status_dot {
+            match app.pane_status(pane_id) {
+                PaneStatus::Idle => None,
+                PaneStatus::Running => Some(("\u{25cf}", status_colors.running)),
+                PaneStatus::Done => Some(("\u{25cf}", status_colors.done)),
+                PaneStatus::Waiting => Some(("\u{25cf}", status_colors.waiting)),
+            }
+        } else {
+            None
+        };
+
+        let branch_name = app
+            .ws()
+            .panes
+            .get(&pane_id)
+            .and_then(|p| p.branch_name.as_deref())
+            .unwrap_or("");
+        let branch_part = if branch_name.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", branch_name)
+        };
+
+        let is_selected = i == overlay.selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(highlight_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT)
+        };
+
+        let marker = if is_selected { " > " } else { "   " };
+        let mut row_spans = vec![Span::styled(marker, Style::default().fg(FOCUS_BORDER))];
+        row_spans.push(Span::styled(format!("[{}] {}  ", i, label), style));
+        if let Some((dot, color)) = dot_info {
+            row_spans.push(Span::styled(
+                format!("{} ", dot),
+                Style::default().fg(color),
+            ));
+        }
+        row_spans.push(Span::styled(branch_part, style));
+        lines.push(Line::from(row_spans));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " j/k: Move  Enter: Select  Esc: Close",
+        Style::default().fg(TEXT_DIM),
+    )));
+
+    lines
+}
+
+fn render_pane_list_sidebar(app: &App, frame: &mut Frame, area: Rect) {
+    let is_focused = app.ws().focus_target == FocusTarget::PaneList;
+    let border_color = if is_focused { FOCUS_BORDER } else { BORDER };
+
+    let title_style = if is_focused {
+        Style::default()
+            .fg(ACCENT_BLUE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT_DIM)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(" Panes ", title_style))
+        .style(Style::default().bg(PANEL_BG));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let lines = build_pane_list_lines(app, is_focused);
+
+    let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
+    frame.render_widget(para, inner);
+}
+
 fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
     let overlay = &app.pane_list_overlay;
     let count = overlay.pane_ids.len();
@@ -2170,67 +2296,7 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
         dialog_rect.height.saturating_sub(2),
     );
 
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (i, &pane_id) in overlay.pane_ids.iter().enumerate() {
-        let label = app
-            .ai_titles
-            .get(&pane_id)
-            .cloned()
-            .unwrap_or_else(|| format!("Pane {}", pane_id));
-
-        let dot_info: Option<(&str, Color)> = if app.config.features.status_dot {
-            let sc = StatusColors::from_config(&app.config.status);
-            match app.pane_status(pane_id) {
-                PaneStatus::Idle => None,
-                PaneStatus::Running => Some(("\u{25cf}", sc.running)),
-                PaneStatus::Done => Some(("\u{25cf}", sc.done)),
-                PaneStatus::Waiting => Some(("\u{25cf}", sc.waiting)),
-            }
-        } else {
-            None
-        };
-
-        let branch_name = app
-            .ws()
-            .panes
-            .get(&pane_id)
-            .and_then(|p| p.branch_name.as_deref())
-            .unwrap_or("");
-        let branch_part = if branch_name.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", branch_name)
-        };
-
-        let is_selected = i == overlay.selected;
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(FOCUS_BORDER)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(TEXT)
-        };
-
-        let marker = if is_selected { " > " } else { "   " };
-        let mut row_spans = vec![Span::styled(marker, Style::default().fg(FOCUS_BORDER))];
-        row_spans.push(Span::styled(format!("[{}] {}  ", i, label), style));
-        if let Some((dot, color)) = dot_info {
-            row_spans.push(Span::styled(
-                format!("{} ", dot),
-                Style::default().fg(color),
-            ));
-        }
-        row_spans.push(Span::styled(branch_part, style));
-        lines.push(Line::from(row_spans));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " j/k: Move  Enter: Select  Esc: Close",
-        Style::default().fg(TEXT_DIM),
-    )));
+    let lines = build_pane_list_lines(app, true);
 
     let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
     frame.render_widget(para, inner);

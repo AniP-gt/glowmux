@@ -142,7 +142,9 @@ fn run_event_loop(
         app.drain_pty_events();
 
         // Auto-refresh file tree if sidebar is visible
-        if app.ws().file_tree_visible && app.ws_mut().file_tree.auto_refresh_if_needed() {
+        if app.ws().sidebar_mode == app::SidebarMode::FileTree
+            && app.ws_mut().file_tree.auto_refresh_if_needed()
+        {
             app.refresh_git_status_for_render(true);
             app.dirty = true;
         }
