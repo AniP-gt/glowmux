@@ -2009,6 +2009,19 @@ impl App {
 
         self.on_workspace_focus_context_changed();
         self.mark_layout_change();
+
+        // Refresh pane list overlay if the closed pane was tracked
+        let closed_id = focused;
+        if self.pane_list_overlay.pane_ids.contains(&closed_id) {
+            let live_ids = self.ws().layout.collect_pane_ids();
+            self.pane_list_overlay.pane_ids = live_ids;
+            let new_len = self.pane_list_overlay.pane_ids.len();
+            if new_len == 0 {
+                self.pane_list_overlay.selected = 0;
+            } else if self.pane_list_overlay.selected >= new_len {
+                self.pane_list_overlay.selected = new_len - 1;
+            }
+        }
     }
 
     fn toggle_zoom(&mut self) {
