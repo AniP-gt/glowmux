@@ -5,7 +5,11 @@ pub async fn invoke_claude_headless(prompt: &str, timeout_secs: u64) -> Option<S
     invoke_claude_headless_with_model(prompt, timeout_secs, "").await
 }
 
-pub async fn invoke_claude_headless_with_model(prompt: &str, timeout_secs: u64, model: &str) -> Option<String> {
+pub async fn invoke_claude_headless_with_model(
+    prompt: &str,
+    timeout_secs: u64,
+    model: &str,
+) -> Option<String> {
     let model = model.to_string();
     let result = timeout(
         Duration::from_secs(timeout_secs),
@@ -117,7 +121,10 @@ pub async fn invoke_gemini(
 
 async fn run_gemini(api_key: String, model: String, prompt: String) -> Option<String> {
     // Validate model name to prevent URL injection (allowlist: alphanumeric, dash, dot)
-    if !model.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.') {
+    if !model
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+    {
         return None;
     }
     // API key is passed as a header, not in the URL, to avoid exposure in process listings/logs

@@ -22,8 +22,12 @@ impl AiTitleBackend {
 /// Used as fallback trigger for title generation in non-Claude panes.
 pub fn is_shell_prompt(line: &str) -> bool {
     let t = line.trim_end();
-    t.ends_with("$ ") || t.ends_with("% ") || t == "$" || t == "%"
-        || t.ends_with("❯ ") || t.ends_with("❯")
+    t.ends_with("$ ")
+        || t.ends_with("% ")
+        || t == "$"
+        || t == "%"
+        || t.ends_with("❯ ")
+        || t.ends_with("❯")
 }
 
 /// Returns true if a line is UI noise that should not be stored in the ring buffer.
@@ -34,12 +38,22 @@ pub fn is_noise_line(line: &str) -> bool {
         return true;
     }
     // Claude Code status bar patterns
-    if t.contains("bypass permissions") { return true; }
-    if t.contains("shift+tab to cycle") { return true; }
-    if t.contains("Update available! Run:") { return true; }
-    if t.contains("brew upgrade claude-code") { return true; }
+    if t.contains("bypass permissions") {
+        return true;
+    }
+    if t.contains("shift+tab to cycle") {
+        return true;
+    }
+    if t.contains("Update available! Run:") {
+        return true;
+    }
+    if t.contains("brew upgrade claude-code") {
+        return true;
+    }
     // Lines that are pure punctuation/separators
-    if t.chars().all(|c| matches!(c, '─' | '━' | '═' | '|' | '│' | '┤' | '├' | ' ' | '·')) {
+    if t.chars()
+        .all(|c| matches!(c, '─' | '━' | '═' | '|' | '│' | '┤' | '├' | ' ' | '·'))
+    {
         return true;
     }
     // Very short lines (single char noise)
@@ -68,7 +82,14 @@ pub async fn generate_title(
         .filter(|c| !c.is_control() || *c == '\n')
         .collect();
     let sanitized = if sanitized.chars().count() > 3000 {
-        sanitized.chars().rev().take(3000).collect::<String>().chars().rev().collect::<String>()
+        sanitized
+            .chars()
+            .rev()
+            .take(3000)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
     } else {
         sanitized
     };
@@ -80,20 +101,37 @@ pub async fn generate_title(
 
     let result = match backend {
         AiTitleBackend::ClaudeHeadless => {
-            ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
+            ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model)
+                .await
         }
         AiTitleBackend::Ollama => {
             ai_invoke::invoke_ollama(ollama_url, ollama_model, &prompt, config.timeout_sec).await
         }
         AiTitleBackend::Gemini => {
             if gemini_api_key.is_empty() {
-                ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
+                ai_invoke::invoke_claude_headless_with_model(
+                    &prompt,
+                    config.timeout_sec,
+                    &config.model,
+                )
+                .await
             } else {
-                let result = ai_invoke::invoke_gemini(gemini_api_key, gemini_model, &prompt, config.timeout_sec).await;
+                let result = ai_invoke::invoke_gemini(
+                    gemini_api_key,
+                    gemini_model,
+                    &prompt,
+                    config.timeout_sec,
+                )
+                .await;
                 if result.is_some() {
                     result
                 } else {
-                    ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model).await
+                    ai_invoke::invoke_claude_headless_with_model(
+                        &prompt,
+                        config.timeout_sec,
+                        &config.model,
+                    )
+                    .await
                 }
             }
         }
@@ -102,7 +140,9 @@ pub async fn generate_title(
     result.and_then(|s| {
         let trimmed = s.trim().to_string();
         // Strip surrounding quotes if the model returned them
-        let trimmed = trimmed.trim_matches(|c| c == '"' || c == '「' || c == '」' || c == '\'').to_string();
+        let trimmed = trimmed
+            .trim_matches(|c| c == '"' || c == '「' || c == '」' || c == '\'')
+            .to_string();
         if trimmed.is_empty() {
             None
         } else if trimmed.chars().count() > max + 5 {
@@ -112,4 +152,3 @@ pub async fn generate_title(
         }
     })
 }
-

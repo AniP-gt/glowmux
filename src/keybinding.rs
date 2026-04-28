@@ -1,5 +1,5 @@
-use crossterm::event::{KeyCode, KeyModifiers};
 use crate::config::KeybindingsConfig;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Parse a keybinding string into (modifiers, keycode).
 /// Supported formats:
@@ -210,6 +210,10 @@ mod tests {
     fn test_validate_defaults_no_duplicates() {
         let kb = KeybindingsConfig::default();
         let warnings = validate_keybindings(&kb);
-        assert!(warnings.is_empty(), "Default config has duplicates: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "Default config has duplicates: {:?}",
+            warnings
+        );
     }
 }
