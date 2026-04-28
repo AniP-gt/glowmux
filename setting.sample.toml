@@ -1,0 +1,155 @@
+# Copy this file to your runtime config path as config.toml.
+# Runtime path:
+#   Linux:  ~/.config/glowmux/config.toml
+#   macOS:  ~/Library/Application Support/glowmux/config.toml
+#   Windows: %AppData%\glowmux\config.toml
+#
+# Session data is stored separately at <config-dir>/glowmux/session.json.
+# The current runtime uses that path even if session.save_path is set below.
+
+[features]
+ai_title = true
+ai_worktree_name = false
+auto_worktree = false
+session_restore = false
+feature_toggle_ui = false
+
+status_dot = true
+status_bg_color = true
+status_bar = true
+zoom = true
+worktree = true
+worktree_ai_name = false
+file_tree = true
+file_preview = true
+diff_preview = false
+cd_tracking = true
+responsive_layout = true
+session_persist = false
+context_copy = true
+layout_picker = true
+startup_panes = true
+
+[terminal]
+scrollback = 10000
+unicode_width = true
+
+[layout]
+auto_responsive = true
+breakpoint_stack = 120
+breakpoint_split2 = 200
+file_tree_width = 20
+preview_width = 40
+
+[startup]
+enabled = false
+default_agent = ""
+
+[[startup.panes]]
+command = ""
+worktree = false
+branch = ""
+
+[pane]
+border_style = "rounded"
+show_pane_numbers = true
+
+[ai]
+provider = "ollama"
+
+[ai.title]
+enabled = true
+model = ""
+prompt = "Generate a short title for this terminal session"
+
+[ai.worktree_name]
+enabled = false
+model = ""
+prompt = "Generate a short branch name for this worktree"
+
+[ai.ollama]
+base_url = "http://localhost:11434"
+model = "llama3.2"
+
+[ai.gemini]
+model = "gemini-2.0-flash"
+# Read on load, but omitted when glowmux writes config.toml back to disk.
+api_key = ""
+
+[ai.claude_headless]
+model = "claude-sonnet-4-5"
+
+[status]
+color_running = "cyan"
+color_done = "green"
+color_waiting = "yellow"
+bg_done = "#1a2e1a"
+bg_waiting = "#2e2a1a"
+bg_reset = "reset"
+indicator = "●"
+respect_terminal_bg = true
+override_bg_done = ""
+override_bg_waiting = ""
+
+[worktree]
+base_dir = "~/worktrees"
+auto_branch = true
+branch_prefix = "feat/"
+
+close_confirm = false
+close_worktree = "ask"
+auto_create = false
+main_branch = "main"
+
+prefer_gwq = false
+gwq_basedir = "~/ghq"
+worktree_dir = ".glowmux"
+base_branch = "main"
+
+[session]
+enabled = false
+auto_save = true
+save_interval = 30
+restore_on_start = true
+restore_claude = false
+# Present in the schema, but the current runtime still saves and loads <config-dir>/glowmux/session.json.
+save_path = "~/.config/glowmux/session.json"
+
+[keybindings]
+prefix = "ctrl+b"
+zoom = "alt+z"
+layout_cycle = "ctrl+space"
+layout_picker = "ctrl+l"
+pane_left = "alt+h"
+pane_right = "alt+l"
+pane_up = "alt+k"
+pane_down = "alt+j"
+quit = "ctrl+q"
+tab_rename = "alt+r"
+tab_new = "ctrl+t"
+tab_next = "alt+right"
+tab_prev = "alt+left"
+settings = "ctrl+,"
+file_tree = "ctrl+f"
+preview_swap = "ctrl+p"
+split_vertical = "ctrl+d"
+split_horizontal = "ctrl+e"
+pane_close = "ctrl+w"
+pane_create = "ctrl+n"
+clipboard_copy = "ctrl+y"
+ai_title_toggle = "alt+a"
+feature_toggle = "?"
+pane_next = "alt+]"
+pane_prev = "alt+["
+
+[ai_title_engine]
+backend = "claude-headless"
+model = "claude-haiku-4-5-20251001"
+max_chars = 20
+timeout_sec = 5
+update_interval_sec = 30
+
+[filetree]
+# preview | editor | neovim | choose
+enter_action = "preview"
+editor = "nvim"
