@@ -1729,7 +1729,7 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " j/k: scroll  Space: toggle  Enter/q: apply  Esc: cancel",
+        " j/k: move  Space: toggle  Enter/q: apply  Esc: cancel",
         Style::default().fg(TEXT_DIM),
     )));
 

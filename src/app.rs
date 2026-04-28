@@ -98,8 +98,6 @@ fn resolve_pane_status(
     PaneStatus::Idle
 }
 
-pub const CHEATSHEET_EXTRA_ROWS: usize = 33;
-
 pub const FEATURES: &[(&str, &str)] = &[
     ("status_dot", "Status Dot"),
     ("status_bg_color", "BG Color"),
@@ -2323,18 +2321,19 @@ impl App {
 
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.feature_toggle.selected = (self.feature_toggle.selected + 1)
-                    .min(FEATURES.len() + CHEATSHEET_EXTRA_ROWS - 1);
+                self.feature_toggle.selected = (self.feature_toggle.selected + 1) % FEATURES.len();
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.feature_toggle.selected = self.feature_toggle.selected.saturating_sub(1);
+                self.feature_toggle.selected = if self.feature_toggle.selected == 0 {
+                    FEATURES.len() - 1
+                } else {
+                    self.feature_toggle.selected - 1
+                };
             }
             KeyCode::Char(' ') => {
-                if self.feature_toggle.selected < FEATURES.len() {
-                    let (key_name, _) = FEATURES[self.feature_toggle.selected];
-                    let current = self.feature_toggle.pending.get_by_key(key_name);
-                    self.feature_toggle.pending.set_by_key(key_name, !current);
-                }
+                let (key_name, _) = FEATURES[self.feature_toggle.selected];
+                let current = self.feature_toggle.pending.get_by_key(key_name);
+                self.feature_toggle.pending.set_by_key(key_name, !current);
             }
             // Only close dialog on plain 'q' (no modifiers) or Enter
             KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
