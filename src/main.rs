@@ -4,6 +4,8 @@ mod app;
 mod claude_monitor;
 mod config;
 mod filetree;
+mod git_diff;
+mod git_exec;
 mod hooks;
 mod keybinding;
 pub mod log;

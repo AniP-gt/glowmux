@@ -1,12 +1,13 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
-use syntect::easy::HighlightLines;
 
 const MAX_PREVIEW_LINES: usize = 500;
 const BINARY_CHECK_BYTES: usize = 8192;
@@ -40,6 +41,7 @@ pub struct DiffLine {
 /// File preview state.
 pub struct Preview {
     pub file_path: Option<PathBuf>,
+    pub diff_git_cwd: Option<PathBuf>,
     pub lines: Vec<String>,
     pub highlighted_lines: Vec<Vec<StyledSpan>>,
     /// When non-empty, the preview renders these diff lines instead of
@@ -55,6 +57,7 @@ pub struct Preview {
     pub is_binary: bool,
     /// Image preview state (set when an image file is loaded).
     pub image_protocol: Option<StatefulProtocol>,
+    pub last_diff_loaded_at: Option<Instant>,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
 }
@@ -63,6 +66,7 @@ impl Preview {
     pub fn new() -> Self {
         Self {
             file_path: None,
+            diff_git_cwd: None,
             lines: Vec::new(),
             highlighted_lines: Vec::new(),
             diff_lines: Vec::new(),
@@ -71,6 +75,7 @@ impl Preview {
             h_scroll_offset: 0,
             is_binary: false,
             image_protocol: None,
+            last_diff_loaded_at: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
         }
@@ -88,12 +93,14 @@ impl Preview {
         }
 
         self.file_path = Some(path.to_path_buf());
+        self.diff_git_cwd = None;
         self.scroll_offset = 0;
         self.h_scroll_offset = 0;
         self.lines.clear();
         self.highlighted_lines.clear();
         self.diff_lines.clear();
         self.diff_mode = false;
+        self.last_diff_loaded_at = None;
         self.is_binary = false;
         self.image_protocol = None;
 
@@ -216,6 +223,7 @@ impl Preview {
     /// Close the preview.
     pub fn close(&mut self) {
         self.file_path = None;
+        self.diff_git_cwd = None;
         self.lines.clear();
         self.highlighted_lines.clear();
         self.diff_lines.clear();
@@ -224,24 +232,26 @@ impl Preview {
         self.h_scroll_offset = 0;
         self.is_binary = false;
         self.image_protocol = None;
+        self.last_diff_loaded_at = None;
     }
 
-    /// Toggle diff preview mode. Loads the diff for the currently-previewed
-    /// file the first time it's enabled (or after the file has changed).
-    /// Returns true if diff content was found, false if there's no diff to show.
-    pub fn toggle_diff(&mut self) -> bool {
+    pub fn toggle_diff_for(&mut self, git_cwd: &Path) -> bool {
         let Some(path) = self.file_path.clone() else {
             return false;
         };
         if self.diff_mode {
-            // Switching off — keep cached lines so re-toggling is cheap.
             self.diff_mode = false;
             self.scroll_offset = 0;
             return true;
         }
-        if self.diff_lines.is_empty() {
-            if let Some(lines) = load_diff_for(&path) {
+        if self.diff_lines.is_empty() || self.diff_git_cwd.as_deref() != Some(git_cwd) {
+            if let Some(lines) = crate::git_diff::load_diff_for(&path, git_cwd) {
                 self.diff_lines = lines;
+                self.diff_git_cwd = Some(git_cwd.to_path_buf());
+                self.last_diff_loaded_at = Some(Instant::now());
+            } else {
+                self.diff_lines.clear();
+                self.diff_git_cwd = Some(git_cwd.to_path_buf());
             }
         }
         if self.diff_lines.is_empty() {
@@ -273,7 +283,11 @@ impl Preview {
 
     /// Scroll down by amount.
     pub fn scroll_down(&mut self, amount: usize) {
-        let total = if self.diff_mode { self.diff_lines.len() } else { self.lines.len() };
+        let total = if self.diff_mode {
+            self.diff_lines.len()
+        } else {
+            self.lines.len()
+        };
         let max_offset = total.saturating_sub(1);
         self.scroll_offset = (self.scroll_offset + amount).min(max_offset);
     }
@@ -303,56 +317,6 @@ impl Preview {
         };
         let max_h = widest.saturating_sub(10);
         self.h_scroll_offset = (self.h_scroll_offset + amount).min(max_h);
-    }
-}
-
-/// Run `git diff HEAD -- {path}` and parse the output into colored diff lines.
-/// Returns None when the file has no diff, the path is not under a git repo,
-/// or the command fails — callers should fall back to normal preview.
-pub fn load_diff_for(path: &Path) -> Option<Vec<DiffLine>> {
-    let path_str = path.to_string_lossy();
-    let cwd = path.parent().unwrap_or_else(|| Path::new("."));
-
-    let output = std::process::Command::new("git")
-        .args(["diff", "HEAD", "--", path_str.as_ref()])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    if text.trim().is_empty() {
-        return None;
-    }
-
-    let mut lines: Vec<DiffLine> = Vec::with_capacity(MAX_PREVIEW_LINES);
-    for raw in text.lines().take(MAX_PREVIEW_LINES) {
-        let kind = classify_diff_line(raw);
-        lines.push(DiffLine {
-            text: raw.to_string(),
-            kind,
-        });
-    }
-    Some(lines)
-}
-
-fn classify_diff_line(line: &str) -> DiffLineKind {
-    if line.starts_with("@@") {
-        DiffLineKind::Hunk
-    } else if line.starts_with("+++") || line.starts_with("---")
-        || line.starts_with("diff ") || line.starts_with("index ")
-        || line.starts_with("new file") || line.starts_with("deleted file")
-        || line.starts_with("rename ") || line.starts_with("similarity ")
-    {
-        DiffLineKind::Header
-    } else if line.starts_with('+') {
-        DiffLineKind::Added
-    } else if line.starts_with('-') {
-        DiffLineKind::Removed
-    } else {
-        DiffLineKind::Context
     }
 }
 
@@ -435,17 +399,5 @@ mod tests {
         // Highlighted lines should have colored spans
         let first = &preview.highlighted_lines[0];
         assert!(!first.is_empty());
-    }
-
-    #[test]
-    fn test_classify_diff_line() {
-        assert_eq!(classify_diff_line("@@ -1,5 +1,7 @@"), DiffLineKind::Hunk);
-        assert_eq!(classify_diff_line("+++ b/file.rs"), DiffLineKind::Header);
-        assert_eq!(classify_diff_line("--- a/file.rs"), DiffLineKind::Header);
-        assert_eq!(classify_diff_line("diff --git a/x b/x"), DiffLineKind::Header);
-        assert_eq!(classify_diff_line("+added line"), DiffLineKind::Added);
-        assert_eq!(classify_diff_line("-removed line"), DiffLineKind::Removed);
-        assert_eq!(classify_diff_line(" context line"), DiffLineKind::Context);
-        assert_eq!(classify_diff_line(""), DiffLineKind::Context);
     }
 }

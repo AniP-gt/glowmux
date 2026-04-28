@@ -784,6 +784,21 @@ impl App {
         }
     }
 
+    fn focused_pane_git_cwd(&self) -> Option<PathBuf> {
+        self.ws()
+            .panes
+            .get(&self.ws().focused_pane_id)
+            .map(|pane| pane.pane_cwd())
+    }
+
+    fn selected_file_path(&self) -> Option<PathBuf> {
+        self.ws()
+            .file_tree
+            .selected_entry()
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| entry.path.clone())
+    }
+
     /// Recompute pane rectangles and apply sizes to every PTY in the
     /// active workspace. Returns `true` if any pane was actually
     /// resized (so callers can decide whether to enter the post-resize
@@ -1356,15 +1371,35 @@ impl App {
                 Ok(true)
             }
             KeyCode::Char('d') => {
-                // Diff preview toggle. Only meaningful when both the feature
-                // is enabled in config AND a file is currently loaded.
                 if self.config.features.diff_preview {
-                    let had_diff = self.ws_mut().preview.toggle_diff();
+                    let Some(path) = self.selected_file_path() else {
+                        self.status_flash = Some((
+                            "select a file to view diff".to_string(),
+                            std::time::Instant::now(),
+                        ));
+                        return Ok(true);
+                    };
+                    let Some(git_cwd) = self.focused_pane_git_cwd() else {
+                        self.status_flash = Some((
+                            "no active pane context for diff".to_string(),
+                            std::time::Instant::now(),
+                        ));
+                        return Ok(true);
+                    };
+
+                    self.clear_selection_if_preview();
+                    let mut picker = self.image_picker.take();
+                    self.ws_mut().preview.load(&path, picker.as_mut());
+                    self.image_picker = picker;
+
+                    let had_diff = self.ws_mut().preview.toggle_diff_for(&git_cwd);
                     if !had_diff {
                         self.status_flash = Some((
                             "no diff for selected file".to_string(),
                             std::time::Instant::now(),
                         ));
+                    } else {
+                        self.ws_mut().focus_target = FocusTarget::Preview;
                     }
                 }
                 Ok(true)
