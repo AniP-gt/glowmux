@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -513,6 +513,7 @@ pub struct Workspace {
     pub file_tree: FileTree,
     pub file_tree_visible: bool,
     pub preview: Preview,
+    pub git_status: Option<crate::git_status::GitStatusSnapshot>,
     pub focus_target: FocusTarget,
     // Cached rects (updated on each render)
     pub last_pane_rects: Vec<(usize, Rect)>,
@@ -545,6 +546,7 @@ impl Workspace {
             focused_pane_id: pane_id,
             file_tree_visible: true,
             preview: Preview::new(),
+            git_status: None,
             focus_target: FocusTarget::Pane,
             last_pane_rects: Vec::new(),
             last_file_tree_rect: None,
@@ -797,6 +799,71 @@ impl App {
             .selected_entry()
             .filter(|entry| !entry.is_dir)
             .map(|entry| entry.path.clone())
+    }
+
+    fn invalidate_git_status_for_tab(&mut self, tab_idx: usize) {
+        if let Some(ws) = self.workspaces.get_mut(tab_idx) {
+            ws.git_status = None;
+        }
+    }
+
+    fn refresh_git_status_for_tab(&mut self, tab_idx: usize, force: bool) {
+        let Some(git_cwd) = self.workspaces.get(tab_idx).and_then(|ws| {
+            ws.panes
+                .get(&ws.focused_pane_id)
+                .map(|pane| pane.pane_cwd())
+        }) else {
+            return;
+        };
+
+        let should_refresh = self
+            .workspaces
+            .get(tab_idx)
+            .and_then(|ws| ws.git_status.as_ref())
+            .map(|snapshot| force || snapshot.is_stale(Duration::from_secs(2)))
+            .unwrap_or(true);
+
+        if !should_refresh {
+            return;
+        }
+
+        let snapshot = crate::git_status::collect_snapshot(&git_cwd);
+        if let Some(ws) = self.workspaces.get_mut(tab_idx) {
+            ws.git_status = snapshot;
+        }
+    }
+
+    fn refresh_git_status_for_active_workspace(&mut self, force: bool) {
+        let active_tab = self.active_tab;
+        self.refresh_git_status_for_tab(active_tab, force);
+    }
+
+    pub fn refresh_git_status_for_render(&mut self, force: bool) {
+        self.refresh_git_status_for_active_workspace(force);
+    }
+
+    fn on_workspace_focus_context_changed(&mut self) {
+        if let Some(git_cwd) = self.focused_pane_git_cwd() {
+            let current_root = self.ws().file_tree.root_path.clone();
+            let current_name = self.ws().name.clone();
+            let current_cwd = self.ws().cwd.clone();
+            let target_name = dir_name(&git_cwd);
+            let show_hidden = self.ws().file_tree.show_hidden;
+            if current_root != git_cwd {
+                self.ws_mut().file_tree = FileTree::new(git_cwd.clone());
+                if self.ws().file_tree.show_hidden != show_hidden {
+                    self.ws_mut().file_tree.toggle_hidden();
+                }
+            }
+            if current_cwd != git_cwd {
+                self.ws_mut().cwd = git_cwd.clone();
+            }
+            if current_name != target_name {
+                self.ws_mut().name = target_name;
+            }
+        }
+        self.refresh_git_status_for_active_workspace(true);
+        self.dirty = true;
     }
 
     /// Recompute pane rectangles and apply sizes to every PTY in the
@@ -1062,6 +1129,7 @@ impl App {
         if self.key_matches(key, &self.config.keybindings.tab_next) {
             if !self.workspaces.is_empty() {
                 self.active_tab = (self.active_tab + 1) % self.workspaces.len();
+                self.on_workspace_focus_context_changed();
             }
             return Ok(true);
         }
@@ -1074,6 +1142,7 @@ impl App {
                 } else {
                     self.active_tab - 1
                 };
+                self.on_workspace_focus_context_changed();
             }
             return Ok(true);
         }
@@ -1141,6 +1210,7 @@ impl App {
                 if let Some(digit) = c.to_digit(10) {
                     if digit >= 1 && (digit as usize) <= self.workspaces.len() {
                         self.active_tab = (digit as usize) - 1;
+                        self.on_workspace_focus_context_changed();
                         return Ok(true);
                     }
                 }
@@ -1544,6 +1614,7 @@ impl App {
         let ws = Workspace::new(name, cwd, pane_id, 10, 40, self.event_tx.clone())?;
         self.workspaces.push(ws);
         self.active_tab = self.workspaces.len() - 1;
+        self.on_workspace_focus_context_changed();
         Ok(())
     }
 
@@ -1555,6 +1626,7 @@ impl App {
         self.ai_titles.remove(&pane_id);
         self.last_ai_title_request.remove(&pane_id);
         self.ai_title_in_flight.remove(&pane_id);
+        self.invalidate_git_status_for_tab(self.active_tab);
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -1650,6 +1722,7 @@ impl App {
         // in it immediately after splitting.
         ws.focused_pane_id = new_id;
 
+        self.on_workspace_focus_context_changed();
         self.mark_layout_change();
         Ok(())
     }
@@ -1693,6 +1766,7 @@ impl App {
             ws.focused_pane_id = first;
         }
 
+        self.on_workspace_focus_context_changed();
         self.mark_layout_change();
     }
 
@@ -2593,7 +2667,7 @@ impl App {
         if let Some(new_id) = best_id {
             self.dismiss_done_on_focus(new_id);
             self.ws_mut().focused_pane_id = new_id;
-            self.dirty = true;
+            self.on_workspace_focus_context_changed();
         }
     }
 
@@ -2634,6 +2708,11 @@ impl App {
         }
         let new_id = self.ws().focused_pane_id;
         self.dismiss_done_on_focus(new_id);
+        if self.ws().focus_target == FocusTarget::Pane {
+            self.on_workspace_focus_context_changed();
+        } else {
+            self.dirty = true;
+        }
     }
 
     /// Cycle focus backward
@@ -2678,6 +2757,11 @@ impl App {
         }
         let new_id = self.ws().focused_pane_id;
         self.dismiss_done_on_focus(new_id);
+        if self.ws().focus_target == FocusTarget::Pane {
+            self.on_workspace_focus_context_changed();
+        } else {
+            self.dirty = true;
+        }
     }
 
     /// Scroll a pane based on scrollbar click position.
@@ -3119,6 +3203,7 @@ impl App {
                                     && now.duration_since(prev_t).as_millis() < 500
                         );
                         self.active_tab = tab_idx;
+                        self.on_workspace_focus_context_changed();
                         if is_double {
                             self.rename_input = Some(String::new());
                             self.last_tab_click = None;
@@ -3224,6 +3309,7 @@ impl App {
                         self.ws_mut().focused_pane_id = pane_id;
                         self.ws_mut().focus_target = FocusTarget::Pane;
                         self.dismiss_done_on_focus(pane_id);
+                        self.on_workspace_focus_context_changed();
 
                         // Check if clicking on scrollbar (rightmost column inside border)
                         let scrollbar_col = rect.x + rect.width - 2; // -1 border, -1 scrollbar
@@ -3631,6 +3717,7 @@ impl App {
                                 }
                                 ws.cwd = new_cwd;
                                 ws.name = dir_name(&ws.cwd);
+                                ws.git_status = None;
                                 ws.preview.close();
                                 preview_closed_by_cwd = true;
                             }
@@ -3639,6 +3726,7 @@ impl App {
                     }
                     if preview_closed_by_cwd {
                         self.preview_zoomed = false;
+                        self.refresh_git_status_for_render(true);
                     }
                 }
                 AppEvent::PtyOutput { pane_id, lines } => {
@@ -3781,6 +3869,9 @@ impl App {
                     for ws in &mut self.workspaces {
                         if let Some(pane) = ws.panes.get_mut(&pane_id) {
                             pane.worktree_path = Some(cwd.clone());
+                            if ws.focused_pane_id == pane_id {
+                                ws.git_status = None;
+                            }
                             // Shell-quote the path to handle spaces and special characters
                             let path_str = cwd.to_string_lossy();
                             let quoted = format!("'{}'", path_str.replace('\'', "'\\''"));
@@ -3794,6 +3885,7 @@ impl App {
                             break;
                         }
                     }
+                    self.refresh_git_status_for_render(true);
                     // Refresh worktree list asynchronously to avoid blocking the UI thread
                     let repo_root = self.ws().cwd.clone();
                     if let Some(handle) = &self.tokio_handle {
@@ -4242,5 +4334,21 @@ mod tests {
         let ids = vec![1, 2, 3];
         assert_eq!((0 + 1) % ids.len(), 1);
         assert_eq!((2 + 1) % ids.len(), 0);
+    }
+
+    #[test]
+    fn test_on_workspace_focus_context_changed_preserves_tree_when_root_matches() {
+        let config = ConfigFile::default();
+        let mut app = App::new(40, 120, config).expect("app");
+
+        let root = app.ws().file_tree.root_path.clone();
+        app.ws_mut().file_tree.selected_index = 2;
+        app.ws_mut().file_tree.scroll_offset = 1;
+
+        app.on_workspace_focus_context_changed();
+
+        assert_eq!(app.ws().file_tree.root_path, root);
+        assert_eq!(app.ws().file_tree.selected_index, 2);
+        assert_eq!(app.ws().file_tree.scroll_offset, 1);
     }
 }

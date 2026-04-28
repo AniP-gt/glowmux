@@ -6,6 +6,7 @@ mod config;
 mod filetree;
 mod git_diff;
 mod git_exec;
+mod git_status;
 mod hooks;
 mod keybinding;
 pub mod log;
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
     let mut app = app::App::new(size.height, size.width, config)?;
     app.image_picker = image_picker;
     app.tokio_handle = async_runtime.handle();
+    app.refresh_git_status_for_render(true);
 
     // Start hook server on async runtime
     if let Some(socket_path) = hooks::socket_path() {
@@ -139,6 +141,7 @@ fn run_event_loop(
 
         // Auto-refresh file tree if sidebar is visible
         if app.ws().file_tree_visible && app.ws_mut().file_tree.auto_refresh_if_needed() {
+            app.refresh_git_status_for_render(true);
             app.dirty = true;
         }
 

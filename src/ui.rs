@@ -53,6 +53,19 @@ fn file_icon(name: &str) -> (&'static str, Color) {
     }
 }
 
+fn git_status_icon(state: Option<crate::git_status::GitFileState>) -> (&'static str, Color) {
+    match state {
+        Some(crate::git_status::GitFileState::Modified) => ("M ", Color::Yellow),
+        Some(crate::git_status::GitFileState::Added) => ("+ ", ACCENT_GREEN),
+        Some(crate::git_status::GitFileState::Deleted) => ("- ", Color::Rgb(0xf8, 0x70, 0x70)),
+        Some(crate::git_status::GitFileState::Renamed) => ("→ ", ACCENT_BLUE),
+        Some(crate::git_status::GitFileState::Untracked) => ("? ", Color::Magenta),
+        Some(crate::git_status::GitFileState::Ignored) => ("◌ ", TEXT_DIM),
+        Some(crate::git_status::GitFileState::Conflicted) => ("! ", Color::Red),
+        None => ("  ", PANEL_BG),
+    }
+}
+
 // ─── Main render ──────────────────────────────────────────
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -323,6 +336,7 @@ fn render_file_tree(app: &mut App, frame: &mut Frame, area: Rect) {
     let scroll = app.ws().file_tree.scroll_offset;
     let selected = app.ws().file_tree.selected_index;
     let max_width = inner.width as usize;
+    let git_status = app.ws().git_status.as_ref();
 
     for (i, entry) in entries.iter().skip(scroll).take(visible_height).enumerate() {
         let y = inner.y + i as u16;
@@ -359,10 +373,19 @@ fn render_file_tree(app: &mut App, frame: &mut Frame, area: Rect) {
         };
 
         let content = format!("{}{}{}", indent, icon, name_display);
-        let truncated = truncate_to_width(&content, max_width.saturating_sub(1));
+        let truncated = truncate_to_width(&content, max_width.saturating_sub(3));
+        let git_state = git_status.and_then(|snapshot| snapshot.state_for(&entry.path));
+        let (git_icon, git_color) = git_status_icon(git_state);
 
         // Build styled spans
         let mut spans = vec![Span::styled(indicator, indicator_style)];
+
+        let git_style = if is_selected {
+            Style::default().fg(git_color).bg(ACTIVE_BG).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(git_color).bg(PANEL_BG)
+        };
+        spans.push(Span::styled(git_icon, git_style));
 
         let content_style = if is_selected {
             Style::default().fg(TEXT).bg(ACTIVE_BG).add_modifier(Modifier::BOLD)
@@ -400,7 +423,7 @@ fn render_panes(app: &mut App, frame: &mut Frame, area: Rect) {
             app.ws()
                 .panes
                 .get(&pane_id)
-                .map(|p| (pane_id, p.cwd.clone()))
+                .map(|p| (pane_id, p.pane_cwd()))
         })
         .collect();
     for (pane_id, cwd) in pane_cwds {
@@ -1165,6 +1188,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(" Move  ", Style::default().fg(TEXT_DIM)),
             Span::styled("Enter", Style::default().fg(ACCENT_BLUE)),
             Span::styled(" Open  ", Style::default().fg(TEXT_DIM)),
+            Span::styled("d", Style::default().fg(ACCENT_BLUE)),
+            Span::styled(" Diff  ", Style::default().fg(TEXT_DIM)),
             Span::styled(".", Style::default().fg(ACCENT_BLUE)),
             Span::styled(" Hidden  ", Style::default().fg(TEXT_DIM)),
             Span::styled("Esc", Style::default().fg(ACCENT_BLUE)),
