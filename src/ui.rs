@@ -1706,7 +1706,7 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
 
 fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateDialog) {
     let popup_w = 50u16.min(area.width.saturating_sub(4));
-    let popup_h = 11u16.min(area.height.saturating_sub(4));
+    let popup_h = 13u16.min(area.height.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(x, y, popup_w, popup_h);
@@ -1777,6 +1777,22 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         Rect::new(inner.x + 1, inner.y + 3, inner.width.saturating_sub(2), 1),
     );
 
+    let prompt_style = if dialog.focused_field == PaneCreateField::PromptField {
+        hl
+    } else {
+        normal
+    };
+    let prompt_display: String = dialog
+        .prompt
+        .chars()
+        .take(inner.width.saturating_sub(12) as usize)
+        .collect();
+    let prompt_text = format!("Prompt: [{}]", prompt_display);
+    frame.render_widget(
+        Paragraph::new(prompt_text).style(prompt_style),
+        Rect::new(inner.x + 1, inner.y + 4, inner.width.saturating_sub(2), 1),
+    );
+
     let ai_focused = dialog.focused_field == PaneCreateField::AiGenerate;
     let ok_focused = dialog.focused_field == PaneCreateField::OkButton;
     let cancel_focused = dialog.focused_field == PaneCreateField::CancelButton;
@@ -1810,7 +1826,7 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         Style::default().fg(Color::Red)
     };
 
-    let buttons_y = inner.y + 5;
+    let buttons_y = inner.y + 6;
     frame.render_widget(
         Paragraph::new(ai_label).style(ai_style),
         Rect::new(inner.x + 1, buttons_y, 15, 1),

@@ -190,6 +190,7 @@ pub enum PaneCreateField {
     BaseBranch,
     WorktreeToggle,
     AgentField,
+    PromptField,
     AiGenerate,
     OkButton,
     CancelButton,
@@ -202,6 +203,7 @@ pub struct PaneCreateDialog {
     pub base_branch: String,
     pub worktree_enabled: bool,
     pub agent: String,
+    pub prompt: String,
     pub generating_name: bool,
     pub focused_field: PaneCreateField,
     pub error_msg: Option<String>,
@@ -215,6 +217,7 @@ impl Default for PaneCreateDialog {
             base_branch: String::new(),
             worktree_enabled: false,
             agent: String::new(),
+            prompt: String::new(),
             generating_name: false,
             focused_field: PaneCreateField::BranchName,
             error_msg: None,
@@ -2336,7 +2339,8 @@ impl App {
                     PaneCreateField::BranchName => PaneCreateField::BaseBranch,
                     PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
                     PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
-                    PaneCreateField::AgentField => PaneCreateField::AiGenerate,
+                    PaneCreateField::AgentField => PaneCreateField::PromptField,
+                    PaneCreateField::PromptField => PaneCreateField::AiGenerate,
                     PaneCreateField::AiGenerate => PaneCreateField::OkButton,
                     PaneCreateField::OkButton => PaneCreateField::CancelButton,
                     PaneCreateField::CancelButton => PaneCreateField::BranchName,
@@ -2350,7 +2354,8 @@ impl App {
                     PaneCreateField::BaseBranch => PaneCreateField::BranchName,
                     PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
                     PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
-                    PaneCreateField::AiGenerate => PaneCreateField::AgentField,
+                    PaneCreateField::PromptField => PaneCreateField::AgentField,
+                    PaneCreateField::AiGenerate => PaneCreateField::PromptField,
                     PaneCreateField::OkButton => PaneCreateField::AiGenerate,
                     PaneCreateField::CancelButton => PaneCreateField::OkButton,
                 };
@@ -2375,14 +2380,40 @@ impl App {
                     }
                     PaneCreateField::OkButton
                     | PaneCreateField::BranchName
-                    | PaneCreateField::BaseBranch => {
+                    | PaneCreateField::BaseBranch
+                    | PaneCreateField::PromptField => {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
                             let agent = self.pane_create_dialog.agent.clone();
                             let base_branch = self.pane_create_dialog.base_branch.clone();
+                            let prompt = self.pane_create_dialog.prompt.clone();
+                            let effective_agent = if !prompt.is_empty()
+                                && agent
+                                    .split_whitespace()
+                                    .next()
+                                    .map(|t| t.to_lowercase())
+                                    .as_deref()
+                                    == Some("claude")
+                            {
+                                let sanitized = Self::sanitize_prompt(&prompt);
+                                if sanitized.len() > 8192 {
+                                    self.pane_create_dialog.error_msg =
+                                        Some("Prompt too long (max 8192 bytes)".into());
+                                    self.dirty = true;
+                                    return Ok(true);
+                                }
+                                format!("{} {}", agent, Self::shell_quote_prompt(&sanitized))
+                            } else {
+                                agent
+                            };
                             self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(branch, worktree, agent, base_branch)?;
+                            self.create_pane_from_dialog(
+                                branch,
+                                worktree,
+                                effective_agent,
+                                base_branch,
+                            )?;
                             self.dirty = true;
                         }
                     }
@@ -2400,6 +2431,10 @@ impl App {
                 }
                 PaneCreateField::AgentField => {
                     self.pane_create_dialog.agent.pop();
+                    self.dirty = true;
+                }
+                PaneCreateField::PromptField => {
+                    self.pane_create_dialog.prompt.pop();
                     self.dirty = true;
                 }
                 _ => {}
@@ -2426,6 +2461,12 @@ impl App {
                             self.dirty = true;
                         }
                     }
+                    PaneCreateField::PromptField => {
+                        if c.is_ascii_graphic() || c == ' ' {
+                            self.pane_create_dialog.prompt.push(c);
+                            self.dirty = true;
+                        }
+                    }
                     PaneCreateField::WorktreeToggle if c == ' ' => {
                         self.pane_create_dialog.worktree_enabled =
                             !self.pane_create_dialog.worktree_enabled;
@@ -2437,6 +2478,25 @@ impl App {
             _ => {}
         }
         Ok(true)
+    }
+
+    fn sanitize_prompt(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' {
+                    ' '
+                } else if (c as u32) < 0x20 || c == '\x7f' {
+                    '\0'
+                } else {
+                    c
+                }
+            })
+            .filter(|&c| c != '\0')
+            .collect()
+    }
+
+    fn shell_quote_prompt(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 
     fn handle_close_confirm_key(&mut self, key: KeyEvent) -> Result<bool> {
