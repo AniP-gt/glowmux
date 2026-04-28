@@ -276,6 +276,7 @@ pub struct KeybindingsConfig {
     pub pane_down: String,
     pub quit: String,
     pub tab_rename: String,
+    pub pane_rename: String,
     pub tab_new: String,
     pub tab_next: String,
     pub tab_prev: String,
@@ -291,6 +292,7 @@ pub struct KeybindingsConfig {
     pub feature_toggle: String,
     pub pane_next: String,
     pub pane_prev: String,
+    pub pane_list: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -498,6 +500,7 @@ impl Default for KeybindingsConfig {
             pane_down: "alt+j".to_string(),
             quit: "ctrl+q".to_string(),
             tab_rename: "alt+r".to_string(),
+            pane_rename: "alt+shift+r".to_string(),
             tab_new: "ctrl+t".to_string(),
             tab_next: "alt+right".to_string(),
             tab_prev: "alt+left".to_string(),
@@ -513,6 +516,7 @@ impl Default for KeybindingsConfig {
             feature_toggle: "?".to_string(),
             pane_next: "alt+]".to_string(),
             pane_prev: "alt+[".to_string(),
+            pane_list: "alt+p".to_string(),
         }
     }
 }
