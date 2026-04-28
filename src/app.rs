@@ -150,12 +150,21 @@ pub enum SplitDirection {
     Horizontal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SidebarMode {
+    #[default]
+    None,
+    FileTree,
+    PaneList,
+}
+
 /// Which area has focus.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusTarget {
     Pane,
     FileTree,
     Preview,
+    PaneList,
 }
 
 /// Layout mode for the workspace.
@@ -190,6 +199,7 @@ pub enum PaneCreateField {
     BaseBranch,
     WorktreeToggle,
     AgentField,
+    PromptField,
     AiGenerate,
     OkButton,
     CancelButton,
@@ -202,6 +212,7 @@ pub struct PaneCreateDialog {
     pub base_branch: String,
     pub worktree_enabled: bool,
     pub agent: String,
+    pub prompt: String,
     pub generating_name: bool,
     pub focused_field: PaneCreateField,
     pub error_msg: Option<String>,
@@ -215,6 +226,7 @@ impl Default for PaneCreateDialog {
             base_branch: String::new(),
             worktree_enabled: false,
             agent: String::new(),
+            prompt: String::new(),
             generating_name: false,
             focused_field: PaneCreateField::BranchName,
             error_msg: None,
@@ -580,7 +592,7 @@ pub struct Workspace {
     pub layout: LayoutNode,
     pub focused_pane_id: usize,
     pub file_tree: FileTree,
-    pub file_tree_visible: bool,
+    pub sidebar_mode: SidebarMode,
     pub preview: Preview,
     pub git_status: Option<crate::git_status::GitStatusSnapshot>,
     pub focus_target: FocusTarget,
@@ -613,7 +625,7 @@ impl Workspace {
             panes,
             layout: LayoutNode::Leaf { pane_id },
             focused_pane_id: pane_id,
-            file_tree_visible: true,
+            sidebar_mode: SidebarMode::FileTree,
             preview: Preview::new(),
             git_status: None,
             focus_target: FocusTarget::Pane,
@@ -674,6 +686,8 @@ pub struct App {
     /// routed to this buffer instead of the focused PTY; Enter commits
     /// to the active workspace's `custom_name`, Esc cancels.
     pub rename_input: Option<String>,
+    pub pane_rename_input: Option<(usize, String)>,
+    pub pane_custom_titles: HashMap<usize, String>,
     /// (tab index, timestamp) of the last left-click on a tab label.
     /// Used to detect a double-click → enter rename mode.
     last_tab_click: Option<(usize, Instant)>,
@@ -753,6 +767,8 @@ impl App {
             last_tab_rects: Vec::new(),
             last_new_tab_rect: None,
             rename_input: None,
+            pane_rename_input: None,
+            pane_custom_titles: HashMap::new(),
             last_tab_click: None,
             selection: None,
             version_info: {
@@ -953,14 +969,17 @@ impl App {
         // PTY size drift from the actually-painted pane size.
         const MIN_PANE_AREA_WIDTH: u16 = 20;
         let tab_h = 1u16;
-        let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
+        let status_h: u16 = if self.status_bar_visible
+            || self.rename_input.is_some()
+            || self.pane_rename_input.is_some()
+        {
             1
         } else {
             0
         };
         let main_h = rows.saturating_sub(tab_h + status_h);
 
-        let mut has_tree = self.ws().file_tree_visible;
+        let mut has_tree = self.ws().sidebar_mode != SidebarMode::None;
         let mut has_preview = self.ws().preview.is_active();
         let tree_w_nom = self.file_tree_width;
         let preview_w_nom = self.preview_width;
@@ -1047,6 +1066,9 @@ impl App {
         // Rename mode — swallow all input until Enter/Esc.
         if self.rename_input.is_some() {
             return Ok(self.handle_rename_key(key));
+        }
+        if self.pane_rename_input.is_some() {
+            return Ok(self.handle_pane_rename_key(key));
         }
 
         // Settings panel dialog
@@ -1140,8 +1162,24 @@ impl App {
         }
 
         // Tab rename (configurable, default Alt+R)
-        if self.key_matches(key, &self.config.keybindings.tab_rename) {
+        if self.key_matches(key, &self.config.keybindings.tab_rename)
+            && self.pane_rename_input.is_none()
+        {
             self.rename_input = Some(String::new());
+            if !self.status_bar_visible {
+                self.mark_layout_change();
+            }
+            return Ok(true);
+        }
+
+        // Pane rename (configurable, default Alt+Shift+R)
+        if self.key_matches(key, &self.config.keybindings.pane_rename)
+            && self.rename_input.is_none()
+        {
+            let target_id = self
+                .zoomed_pane_id
+                .unwrap_or(self.ws().focused_pane_id);
+            self.pane_rename_input = Some((target_id, String::new()));
             if !self.status_bar_visible {
                 self.mark_layout_change();
             }
@@ -1214,6 +1252,7 @@ impl App {
         // Next tab (configurable, default Alt+Right)
         if self.key_matches(key, &self.config.keybindings.tab_next) {
             if !self.workspaces.is_empty() {
+                self.reset_pane_list_sidebar_if_active();
                 self.active_tab = (self.active_tab + 1) % self.workspaces.len();
                 self.on_workspace_focus_context_changed();
             }
@@ -1223,6 +1262,7 @@ impl App {
         // Previous tab (configurable, default Alt+Left)
         if self.key_matches(key, &self.config.keybindings.tab_prev) {
             if !self.workspaces.is_empty() {
+                self.reset_pane_list_sidebar_if_active();
                 self.active_tab = if self.active_tab == 0 {
                     self.workspaces.len() - 1
                 } else {
@@ -1295,6 +1335,7 @@ impl App {
             if let KeyCode::Char(c) = key.code {
                 if let Some(digit) = c.to_digit(10) {
                     if digit >= 1 && (digit as usize) <= self.workspaces.len() {
+                        self.reset_pane_list_sidebar_if_active();
                         self.active_tab = (digit as usize) - 1;
                         self.on_workspace_focus_context_changed();
                         return Ok(true);
@@ -1339,6 +1380,15 @@ impl App {
             return Ok(true);
         }
 
+        // Pane list sidebar mode
+        if self.ws().focus_target == FocusTarget::PaneList {
+            if self.key_matches(key, &self.config.keybindings.pane_list) {
+                self.toggle_pane_list_sidebar();
+                return Ok(true);
+            }
+            return self.handle_pane_list_key(key);
+        }
+
         // Preview mode
         if self.ws().focus_target == FocusTarget::Preview {
             return self.handle_preview_key(key);
@@ -1356,6 +1406,12 @@ impl App {
         // Toggle file tree (configurable, default Ctrl+F)
         if self.key_matches(key, &self.config.keybindings.file_tree) {
             self.toggle_file_tree();
+            return Ok(true);
+        }
+
+        // Toggle pane list sidebar (configurable, default Alt+P)
+        if self.key_matches(key, &self.config.keybindings.pane_list) {
+            self.toggle_pane_list_sidebar();
             return Ok(true);
         }
 
@@ -1455,28 +1511,57 @@ impl App {
                     self.mark_layout_change();
                 }
             }
-            KeyCode::Backspace => {
-                buf.pop();
-            }
-            KeyCode::Char(c) => {
-                // Ignore chars combined with Ctrl/Alt so shortcuts like
-                // Ctrl+C don't leak into the buffer as literal letters.
-                // Shift is fine — that's just uppercase.
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
+            _ => {
+                if !edit_key_buffer(buf, key, 32) {
                     return true;
                 }
-                // Cap at something sane so a stuck key can't grow the tab bar forever.
-                if buf.chars().count() < 32 {
-                    buf.push(c);
-                }
             }
-            _ => return true,
         }
         self.dirty = true;
         true
+    }
+
+    fn handle_pane_rename_key(&mut self, key: KeyEvent) -> bool {
+        let needs_relayout = !self.status_bar_visible;
+        match key.code {
+            KeyCode::Esc => {
+                self.pane_rename_input = None;
+                if needs_relayout {
+                    self.mark_layout_change();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some((pane_id, buf)) = self.pane_rename_input.take() {
+                    let trimmed = buf.trim().to_string();
+                    if trimmed.is_empty() {
+                        self.pane_custom_titles.remove(&pane_id);
+                    } else {
+                        self.pane_custom_titles.insert(pane_id, trimmed);
+                    }
+                    if needs_relayout {
+                        self.mark_layout_change();
+                    }
+                }
+            }
+            _ => {
+                // INVARIANT: caller confirmed is_some(); neither Esc nor Enter ran.
+                let Some((_, buf)) = self.pane_rename_input.as_mut() else {
+                    return false;
+                };
+                if !edit_key_buffer(buf, key, 32) {
+                    return true;
+                }
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    pub fn pane_display_title(&self, pane_id: usize) -> Option<&str> {
+        self.pane_custom_titles
+            .get(&pane_id)
+            .map(|s| s.as_str())
+            .or_else(|| self.ai_titles.get(&pane_id).map(|s| s.as_str()))
     }
 
     fn handle_file_tree_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1662,7 +1747,7 @@ impl App {
             (_, KeyCode::Esc) => {
                 self.preview_zoomed = false;
                 // Return focus to the file tree if it's visible, otherwise to the pane.
-                self.ws_mut().focus_target = if self.ws().file_tree_visible {
+                self.ws_mut().focus_target = if self.ws().sidebar_mode == SidebarMode::FileTree {
                     FocusTarget::FileTree
                 } else {
                     FocusTarget::Pane
@@ -1736,6 +1821,10 @@ impl App {
         self.ai_titles.remove(&pane_id);
         self.last_ai_title_request.remove(&pane_id);
         self.ai_title_in_flight.remove(&pane_id);
+        self.pane_custom_titles.remove(&pane_id);
+        if matches!(self.pane_rename_input, Some((id, _)) if id == pane_id) {
+            self.pane_rename_input = None;
+        }
         self.invalidate_git_status_for_tab(self.active_tab);
     }
 
@@ -1743,6 +1832,7 @@ impl App {
         if self.workspaces.len() <= 1 {
             return;
         }
+        self.reset_pane_list_sidebar_if_active();
         let pane_ids: Vec<usize> = self.workspaces[index].panes.keys().copied().collect();
         for pane_id in pane_ids {
             self.cleanup_pane_runtime_state(pane_id);
@@ -1756,31 +1846,71 @@ impl App {
 
     fn toggle_file_tree(&mut self) {
         let ws = self.ws_mut();
-        let was_visible = ws.file_tree_visible;
-        let will_be_visible;
-        if ws.file_tree_visible && ws.focus_target == FocusTarget::FileTree {
-            // Closing the tree — keep the preview open so the user can
-            // continue reading the file they just opened. Focus moves
-            // to the preview if it's active, otherwise back to the pane.
-            ws.file_tree_visible = false;
-            ws.focus_target = if ws.preview.is_active() {
-                FocusTarget::Preview
-            } else {
-                FocusTarget::Pane
-            };
-            will_be_visible = false;
-        } else if ws.file_tree_visible {
-            ws.focus_target = FocusTarget::FileTree;
-            will_be_visible = true;
-        } else {
-            ws.file_tree_visible = true;
-            ws.focus_target = FocusTarget::FileTree;
-            will_be_visible = true;
+        match (ws.sidebar_mode, ws.focus_target) {
+            (SidebarMode::FileTree, FocusTarget::FileTree) => {
+                ws.sidebar_mode = SidebarMode::None;
+                ws.focus_target = if ws.preview.is_active() {
+                    FocusTarget::Preview
+                } else {
+                    FocusTarget::Pane
+                };
+            }
+            (SidebarMode::FileTree, _) => {
+                ws.focus_target = FocusTarget::FileTree;
+                return;
+            }
+            _ => {
+                ws.sidebar_mode = SidebarMode::FileTree;
+                ws.focus_target = FocusTarget::FileTree;
+            }
         }
+        self.mark_layout_change();
+    }
 
-        // Only relayout if the pane area actually changes (visibility flipped).
-        if was_visible != will_be_visible {
+    fn reset_pane_list_sidebar_if_active(&mut self) {
+        let was_active = {
+            let ws = self.ws_mut();
+            if ws.sidebar_mode == SidebarMode::PaneList {
+                ws.sidebar_mode = SidebarMode::None;
+                ws.focus_target = FocusTarget::Pane;
+                true
+            } else {
+                false
+            }
+        };
+        if was_active {
             self.mark_layout_change();
+        }
+    }
+
+    fn toggle_pane_list_sidebar(&mut self) {
+        let sidebar = self.ws().sidebar_mode;
+        let focus = self.ws().focus_target;
+        match (sidebar, focus) {
+            (SidebarMode::PaneList, FocusTarget::PaneList) => {
+                self.ws_mut().sidebar_mode = SidebarMode::None;
+                self.ws_mut().focus_target = FocusTarget::Pane;
+                self.mark_layout_change();
+            }
+            (SidebarMode::PaneList, _) => {
+                self.ws_mut().focus_target = FocusTarget::PaneList;
+                self.dirty = true;
+            }
+            _ => {
+                let pane_ids = self.ws().layout.collect_pane_ids();
+                let focused = self.ws().focused_pane_id;
+                let selected = pane_ids
+                    .iter()
+                    .position(|&id| id == focused)
+                    .unwrap_or(0)
+                    .min(pane_ids.len().saturating_sub(1));
+                self.pane_list_overlay.pane_ids = pane_ids;
+                self.pane_list_overlay.selected = selected;
+                // Do NOT set pane_list_overlay.visible = true
+                self.ws_mut().sidebar_mode = SidebarMode::PaneList;
+                self.ws_mut().focus_target = FocusTarget::PaneList;
+                self.mark_layout_change();
+            }
         }
     }
 
@@ -1880,6 +2010,19 @@ impl App {
 
         self.on_workspace_focus_context_changed();
         self.mark_layout_change();
+
+        // Refresh pane list overlay if the closed pane was tracked
+        let closed_id = focused;
+        if self.pane_list_overlay.pane_ids.contains(&closed_id) {
+            let live_ids = self.ws().layout.collect_pane_ids();
+            self.pane_list_overlay.pane_ids = live_ids;
+            let new_len = self.pane_list_overlay.pane_ids.len();
+            if new_len == 0 {
+                self.pane_list_overlay.selected = 0;
+            } else if self.pane_list_overlay.selected >= new_len {
+                self.pane_list_overlay.selected = new_len - 1;
+            }
+        }
     }
 
     fn toggle_zoom(&mut self) {
@@ -2336,7 +2479,8 @@ impl App {
                     PaneCreateField::BranchName => PaneCreateField::BaseBranch,
                     PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
                     PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
-                    PaneCreateField::AgentField => PaneCreateField::AiGenerate,
+                    PaneCreateField::AgentField => PaneCreateField::PromptField,
+                    PaneCreateField::PromptField => PaneCreateField::AiGenerate,
                     PaneCreateField::AiGenerate => PaneCreateField::OkButton,
                     PaneCreateField::OkButton => PaneCreateField::CancelButton,
                     PaneCreateField::CancelButton => PaneCreateField::BranchName,
@@ -2350,7 +2494,8 @@ impl App {
                     PaneCreateField::BaseBranch => PaneCreateField::BranchName,
                     PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
                     PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
-                    PaneCreateField::AiGenerate => PaneCreateField::AgentField,
+                    PaneCreateField::PromptField => PaneCreateField::AgentField,
+                    PaneCreateField::AiGenerate => PaneCreateField::PromptField,
                     PaneCreateField::OkButton => PaneCreateField::AiGenerate,
                     PaneCreateField::CancelButton => PaneCreateField::OkButton,
                 };
@@ -2375,14 +2520,40 @@ impl App {
                     }
                     PaneCreateField::OkButton
                     | PaneCreateField::BranchName
-                    | PaneCreateField::BaseBranch => {
+                    | PaneCreateField::BaseBranch
+                    | PaneCreateField::PromptField => {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
                             let agent = self.pane_create_dialog.agent.clone();
                             let base_branch = self.pane_create_dialog.base_branch.clone();
+                            let prompt = self.pane_create_dialog.prompt.clone();
+                            let effective_agent = if !prompt.is_empty()
+                                && agent
+                                    .split_whitespace()
+                                    .next()
+                                    .map(|t| t.to_lowercase())
+                                    .as_deref()
+                                    == Some("claude")
+                            {
+                                let sanitized = Self::sanitize_prompt(&prompt);
+                                if sanitized.len() > 8192 {
+                                    self.pane_create_dialog.error_msg =
+                                        Some("Prompt too long (max 8192 bytes)".into());
+                                    self.dirty = true;
+                                    return Ok(true);
+                                }
+                                format!("{} {}", agent, Self::shell_quote_prompt(&sanitized))
+                            } else {
+                                agent
+                            };
                             self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(branch, worktree, agent, base_branch)?;
+                            self.create_pane_from_dialog(
+                                branch,
+                                worktree,
+                                effective_agent,
+                                base_branch,
+                            )?;
                             self.dirty = true;
                         }
                     }
@@ -2400,6 +2571,10 @@ impl App {
                 }
                 PaneCreateField::AgentField => {
                     self.pane_create_dialog.agent.pop();
+                    self.dirty = true;
+                }
+                PaneCreateField::PromptField => {
+                    self.pane_create_dialog.prompt.pop();
                     self.dirty = true;
                 }
                 _ => {}
@@ -2426,6 +2601,12 @@ impl App {
                             self.dirty = true;
                         }
                     }
+                    PaneCreateField::PromptField => {
+                        if c.is_ascii_graphic() || c == ' ' {
+                            self.pane_create_dialog.prompt.push(c);
+                            self.dirty = true;
+                        }
+                    }
                     PaneCreateField::WorktreeToggle if c == ' ' => {
                         self.pane_create_dialog.worktree_enabled =
                             !self.pane_create_dialog.worktree_enabled;
@@ -2437,6 +2618,25 @@ impl App {
             _ => {}
         }
         Ok(true)
+    }
+
+    fn sanitize_prompt(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' {
+                    ' '
+                } else if (c as u32) < 0x20 || c == '\x7f' {
+                    '\0'
+                } else {
+                    c
+                }
+            })
+            .filter(|&c| c != '\0')
+            .collect()
+    }
+
+    fn shell_quote_prompt(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 
     fn handle_close_confirm_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -2724,7 +2924,10 @@ impl App {
                     .map(|p| crate::session::PaneSnapshot {
                         id: p.id,
                         cwd: p.pane_cwd(),
-                        title: self.ai_titles.get(&p.id).cloned().unwrap_or_default(),
+                        title: self
+                            .pane_display_title(p.id)
+                            .unwrap_or_default()
+                            .to_string(),
                         worktree_path: p.worktree_path.clone(),
                         branch: p.branch_name.clone(),
                     })
@@ -2860,10 +3063,11 @@ impl App {
     fn focus_next_pane(&mut self) {
         let ws = self.ws_mut();
         let ids = ws.layout.collect_pane_ids();
-        let tree_visible = ws.file_tree_visible;
+        let tree_visible = ws.sidebar_mode == SidebarMode::FileTree;
         let preview_active = ws.preview.is_active();
         let _swapped = false; // preview position doesn't affect focus order
 
+        let mut closed_pane_list_sidebar = false;
         match ws.focus_target {
             FocusTarget::FileTree => {
                 // File tree → preview (if active) or first pane
@@ -2890,6 +3094,14 @@ impl App {
                     }
                 }
             }
+            FocusTarget::PaneList => {
+                ws.focus_target = FocusTarget::Pane;
+                ws.sidebar_mode = SidebarMode::None;
+                closed_pane_list_sidebar = true;
+            }
+        }
+        if closed_pane_list_sidebar {
+            self.mark_layout_change();
         }
         let new_id = self.ws().focused_pane_id;
         self.dismiss_done_on_focus(new_id);
@@ -2904,9 +3116,10 @@ impl App {
     fn focus_prev_pane(&mut self) {
         let ws = self.ws_mut();
         let ids = ws.layout.collect_pane_ids();
-        let tree_visible = ws.file_tree_visible;
+        let tree_visible = ws.sidebar_mode == SidebarMode::FileTree;
         let preview_active = ws.preview.is_active();
 
+        let mut closed_pane_list_sidebar = false;
         match ws.focus_target {
             FocusTarget::FileTree => {
                 // File tree → last pane
@@ -2939,6 +3152,14 @@ impl App {
                     }
                 }
             }
+            FocusTarget::PaneList => {
+                ws.focus_target = FocusTarget::Pane;
+                ws.sidebar_mode = SidebarMode::None;
+                closed_pane_list_sidebar = true;
+            }
+        }
+        if closed_pane_list_sidebar {
+            self.mark_layout_change();
         }
         let new_id = self.ws().focused_pane_id;
         self.dismiss_done_on_focus(new_id);
@@ -3264,6 +3485,12 @@ impl App {
     }
 
     fn open_pane_list_overlay(&mut self) {
+        if self.ws().sidebar_mode == SidebarMode::PaneList {
+            self.ws_mut().sidebar_mode = SidebarMode::None;
+            self.ws_mut().focus_target = FocusTarget::Pane;
+            self.mark_layout_change();
+            return;
+        }
         let pane_ids = self.ws().layout.collect_pane_ids();
         let focused = self.ws().focused_pane_id;
         let selected = pane_ids.iter().position(|&id| id == focused).unwrap_or(0);
@@ -3276,9 +3503,15 @@ impl App {
     }
 
     fn handle_pane_list_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let is_sidebar = self.ws().sidebar_mode == SidebarMode::PaneList;
         let len = self.pane_list_overlay.pane_ids.len();
         if len == 0 {
             self.pane_list_overlay.visible = false;
+            if is_sidebar {
+                self.ws_mut().sidebar_mode = SidebarMode::None;
+                self.ws_mut().focus_target = FocusTarget::Pane;
+                self.mark_layout_change();
+            }
             return Ok(true);
         }
 
@@ -3299,13 +3532,25 @@ impl App {
                     .pane_ids
                     .get(self.pane_list_overlay.selected)
                 {
-                    self.ws_mut().focused_pane_id = selected_id;
-                    self.on_workspace_focus_context_changed();
+                    if self.ws().panes.contains_key(&selected_id) {
+                        self.ws_mut().focused_pane_id = selected_id;
+                        self.on_workspace_focus_context_changed();
+                    }
                 }
                 self.pane_list_overlay.visible = false;
+                if is_sidebar {
+                    self.ws_mut().sidebar_mode = SidebarMode::None;
+                    self.ws_mut().focus_target = FocusTarget::Pane;
+                    self.mark_layout_change();
+                }
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.pane_list_overlay.visible = false;
+                if is_sidebar {
+                    self.ws_mut().sidebar_mode = SidebarMode::None;
+                    self.ws_mut().focus_target = FocusTarget::Pane;
+                    self.mark_layout_change();
+                }
             }
             _ => {}
         }
@@ -3403,6 +3648,14 @@ impl App {
                 self.mark_layout_change();
             }
         }
+        if matches!(mouse.kind, MouseEventKind::Down(_)) && self.pane_rename_input.is_some() {
+            let needs_relayout = !self.status_bar_visible;
+            self.pane_rename_input = None;
+            self.dirty = true;
+            if needs_relayout {
+                self.mark_layout_change();
+            }
+        }
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -3426,6 +3679,9 @@ impl App {
                                 if prev_idx == tab_idx
                                     && now.duration_since(prev_t).as_millis() < 500
                         );
+                        if tab_idx != self.active_tab {
+                            self.reset_pane_list_sidebar_if_active();
+                        }
                         self.active_tab = tab_idx;
                         self.on_workspace_focus_context_changed();
                         if is_double {
@@ -3496,29 +3752,38 @@ impl App {
                     }
                 }
 
-                // Check file tree click
+                // Check sidebar click (file tree or pane list)
                 if let Some(rect) = self.ws().last_file_tree_rect {
                     if col >= rect.x
                         && col < rect.x + rect.width
                         && row >= rect.y
                         && row < rect.y + rect.height
                     {
-                        self.ws_mut().focus_target = FocusTarget::FileTree;
-                        let inner_y = row.saturating_sub(rect.y + 1);
-                        let scroll = self.ws().file_tree.scroll_offset;
-                        let entry_idx = scroll + inner_y as usize;
-                        let entry_count = self.ws().file_tree.visible_entries().len();
-                        if entry_idx < entry_count {
-                            self.ws_mut().file_tree.selected_index = entry_idx;
-                            let path = self.ws_mut().file_tree.toggle_or_select();
-                            if let Some(path) = path {
-                                self.clear_selection_if_preview();
-                                let mut picker = self.image_picker.take();
-                                self.ws_mut().preview.load(&path, picker.as_mut());
-                                self.image_picker = picker;
+                        match self.ws().sidebar_mode {
+                            SidebarMode::FileTree => {
+                                self.ws_mut().focus_target = FocusTarget::FileTree;
+                                let inner_y = row.saturating_sub(rect.y + 1);
+                                let scroll = self.ws().file_tree.scroll_offset;
+                                let entry_idx = scroll + inner_y as usize;
+                                let entry_count = self.ws().file_tree.visible_entries().len();
+                                if entry_idx < entry_count {
+                                    self.ws_mut().file_tree.selected_index = entry_idx;
+                                    let path = self.ws_mut().file_tree.toggle_or_select();
+                                    if let Some(path) = path {
+                                        self.clear_selection_if_preview();
+                                        let mut picker = self.image_picker.take();
+                                        self.ws_mut().preview.load(&path, picker.as_mut());
+                                        self.image_picker = picker;
+                                    }
+                                }
+                                return;
                             }
+                            SidebarMode::PaneList => {
+                                self.ws_mut().focus_target = FocusTarget::PaneList;
+                                return;
+                            }
+                            SidebarMode::None => {}
                         }
-                        return;
                     }
                 }
 
@@ -3775,8 +4040,16 @@ impl App {
                         && row >= rect.y
                         && row < rect.y + rect.height
                     {
-                        self.ws_mut().file_tree.scroll_up(3);
-                        return;
+                        match self.ws().sidebar_mode {
+                            SidebarMode::FileTree => {
+                                self.ws_mut().file_tree.scroll_up(3);
+                                return;
+                            }
+                            SidebarMode::PaneList => {
+                                return;
+                            }
+                            SidebarMode::None => {}
+                        }
                     }
                 }
                 if let Some(rect) = self.ws().last_preview_rect {
@@ -3813,8 +4086,16 @@ impl App {
                         && row >= rect.y
                         && row < rect.y + rect.height
                     {
-                        self.ws_mut().file_tree.scroll_down(3);
-                        return;
+                        match self.ws().sidebar_mode {
+                            SidebarMode::FileTree => {
+                                self.ws_mut().file_tree.scroll_down(3);
+                                return;
+                            }
+                            SidebarMode::PaneList => {
+                                return;
+                            }
+                            SidebarMode::None => {}
+                        }
                     }
                 }
                 if let Some(rect) = self.ws().last_preview_rect {
@@ -4336,6 +4617,28 @@ fn dir_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+fn edit_key_buffer(buf: &mut String, key: KeyEvent, max_len: usize) -> bool {
+    match key.code {
+        KeyCode::Backspace => {
+            buf.pop();
+            true
+        }
+        KeyCode::Char(c) => {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return true;
+            }
+            if buf.chars().count() < max_len {
+                buf.push(c);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 fn should_request_ai_title(
     already_requested_once: bool,
     in_flight: bool,
@@ -4779,5 +5082,87 @@ mod tests {
         }];
 
         assert_eq!(extract_preview_selected_text(&preview, 0, 0, 0, 5), "+delta");
+    }
+
+    #[test]
+    fn pane_display_title_priority() {
+        let mut app = App::new(20, 80, ConfigFile::default()).unwrap();
+        let pane_id = app.ws().focused_pane_id;
+
+        assert_eq!(app.pane_display_title(pane_id), None);
+
+        app.ai_titles.insert(pane_id, "ai-title".to_string());
+        assert_eq!(app.pane_display_title(pane_id), Some("ai-title"));
+
+        app.pane_custom_titles
+            .insert(pane_id, "custom".to_string());
+        assert_eq!(app.pane_display_title(pane_id), Some("custom"));
+
+        app.pane_custom_titles.remove(&pane_id);
+        assert_eq!(app.pane_display_title(pane_id), Some("ai-title"));
+    }
+
+    #[test]
+    fn pane_cleanup_removes_custom_title() {
+        let mut app = App::new(20, 80, ConfigFile::default()).unwrap();
+        let pane_id = 5;
+
+        app.pane_custom_titles
+            .insert(pane_id, "manual".to_string());
+        app.pane_rename_input = Some((pane_id, "buf".to_string()));
+
+        app.cleanup_pane_runtime_state(pane_id);
+
+        assert!(!app.pane_custom_titles.contains_key(&pane_id));
+        assert!(app.pane_rename_input.is_none());
+    }
+
+    #[test]
+    fn rename_mutual_exclusion() {
+        let mut app = App::new(20, 80, ConfigFile::default()).unwrap();
+
+        // Tab rename dispatch should be skipped while pane_rename_input is set.
+        app.pane_rename_input = Some((1, String::new()));
+        let alt_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+        // pane_rename modal swallows the key (rather than starting tab rename).
+        let _ = app.handle_key_event(alt_r).unwrap();
+        assert!(app.rename_input.is_none());
+        assert!(app.pane_rename_input.is_some());
+
+        // Conversely, pane_rename dispatch should be skipped while rename_input is set.
+        app.pane_rename_input = None;
+        app.rename_input = Some(String::new());
+        let alt_shift_r =
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let _ = app.handle_key_event(alt_shift_r).unwrap();
+        assert!(app.pane_rename_input.is_none());
+        assert!(app.rename_input.is_some());
+    }
+
+    #[test]
+    fn edit_key_buffer_handles_basic_input() {
+        let mut buf = String::from("hi");
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(edit_key_buffer(&mut buf, key, 32));
+        assert_eq!(buf, "hia");
+
+        let bs = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(edit_key_buffer(&mut buf, bs, 32));
+        assert_eq!(buf, "hi");
+
+        // Ctrl/Alt-modified chars are swallowed but do not append.
+        let ctrl = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(edit_key_buffer(&mut buf, ctrl, 32));
+        assert_eq!(buf, "hi");
+
+        // Length cap.
+        let mut full = "x".repeat(32);
+        let key = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(edit_key_buffer(&mut full, key, 32));
+        assert_eq!(full.chars().count(), 32);
+
+        // Non-handled keys return false.
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!edit_key_buffer(&mut buf, enter, 32));
     }
 }
