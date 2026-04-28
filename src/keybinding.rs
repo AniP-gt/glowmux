@@ -247,4 +247,16 @@ mod tests {
             warnings
         );
     }
+
+    #[test]
+    fn test_parse_alt_bracket() {
+        assert_eq!(
+            parse_keybinding("alt+["),
+            Some((KeyModifiers::ALT, KeyCode::Char('[')))
+        );
+        assert_eq!(
+            parse_keybinding("alt+]"),
+            Some((KeyModifiers::ALT, KeyCode::Char(']')))
+        );
+    }
 }
