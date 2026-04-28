@@ -1,8 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 static LOG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 
@@ -27,7 +27,10 @@ pub fn init() {
 
     let _ = LOG_FILE.set(Mutex::new(file));
 
-    write_log("INFO", &format!("glowmux started (version {})", env!("CARGO_PKG_VERSION")));
+    write_log(
+        "INFO",
+        &format!("glowmux started (version {})", env!("CARGO_PKG_VERSION")),
+    );
 }
 
 pub fn write_log(level: &str, msg: &str) {
@@ -49,10 +52,7 @@ pub fn write_log(level: &str, msg: &str) {
 }
 
 fn thread_name() -> String {
-    std::thread::current()
-        .name()
-        .unwrap_or("?")
-        .to_string()
+    std::thread::current().name().unwrap_or("?").to_string()
 }
 
 /// Format Unix timestamp as HH:MM:SS UTC (no external crate needed).
@@ -63,7 +63,10 @@ fn format_timestamp(secs: u64) -> String {
     let days = secs / 86400;
     // Derive year/month/day from days since 1970-01-01 (proleptic Gregorian)
     let (year, month, day) = days_to_ymd(days);
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z", year, month, day, h, m, s)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
+        year, month, day, h, m, s
+    )
 }
 
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {

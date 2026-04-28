@@ -24,10 +24,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -35,7 +35,9 @@ fn main() -> Result<()> {
     // Detect if running inside another glowmux instance
     if std::env::var("GLOWMUX").is_ok() {
         eprintln!("glowmux: already running inside a glowmux pane (nested instance not allowed).");
-        eprintln!("         Open a new tab with Alt+T (or Ctrl+T) or split with Ctrl+D / Ctrl+E instead.");
+        eprintln!(
+            "         Open a new tab with Alt+T (or Ctrl+T) or split with Ctrl+D / Ctrl+E instead."
+        );
         std::process::exit(1);
     }
 
@@ -205,7 +207,8 @@ fn run_event_loop(
                                                 }
                                                 break;
                                             }
-                                            if let Some(b) = crate::app::key_event_to_bytes_pub(&k) {
+                                            if let Some(b) = crate::app::key_event_to_bytes_pub(&k)
+                                            {
                                                 paste_buffer.extend_from_slice(&b);
                                             }
                                         }
