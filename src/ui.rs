@@ -1705,7 +1705,6 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
         ]));
     }
 
-    // Prefix operations subsection
     let prefix_display = keybinding::keybinding_display(kb.prefix.as_str());
     let quit_display = keybinding::keybinding_display(kb.quit.as_str());
     let layout_cycle_display = keybinding::keybinding_display(kb.layout_cycle.as_str());
