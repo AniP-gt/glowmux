@@ -1832,6 +1832,7 @@ impl App {
         if self.workspaces.len() <= 1 {
             return;
         }
+        self.reset_pane_list_sidebar_if_active();
         let pane_ids: Vec<usize> = self.workspaces[index].panes.keys().copied().collect();
         for pane_id in pane_ids {
             self.cleanup_pane_runtime_state(pane_id);
@@ -3488,6 +3489,7 @@ impl App {
             self.ws_mut().sidebar_mode = SidebarMode::None;
             self.ws_mut().focus_target = FocusTarget::Pane;
             self.mark_layout_change();
+            return;
         }
         let pane_ids = self.ws().layout.collect_pane_ids();
         let focused = self.ws().focused_pane_id;
