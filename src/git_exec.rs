@@ -23,7 +23,19 @@ pub fn git_command() -> std::process::Command {
     std::process::Command::new(git_binary())
 }
 
+pub fn delta_binary() -> Option<OsString> {
+    if let Some(bin) = std::env::var_os("GLOWMUX_DELTA_BIN") {
+        return Some(bin);
+    }
+
+    resolve_named_binary(std::env::var_os("PATH"), delta_binary_names())
+}
+
 fn resolve_from_path(path_var: Option<OsString>) -> Option<OsString> {
+    resolve_named_binary(path_var, git_binary_names())
+}
+
+fn resolve_named_binary(path_var: Option<OsString>, names: &[&str]) -> Option<OsString> {
     let path_var = path_var?;
 
     for dir in std::env::split_paths(&path_var) {
@@ -31,7 +43,7 @@ fn resolve_from_path(path_var: Option<OsString>) -> Option<OsString> {
             continue;
         }
 
-        for candidate in git_binary_names().iter().map(|name| dir.join(name)) {
+        for candidate in names.iter().map(|name| dir.join(name)) {
             if candidate.is_file() {
                 return Some(candidate.into_os_string());
             }
@@ -49,6 +61,16 @@ fn git_binary_names() -> &'static [&'static str] {
 #[cfg(not(windows))]
 fn git_binary_names() -> &'static [&'static str] {
     &["git"]
+}
+
+#[cfg(windows)]
+fn delta_binary_names() -> &'static [&'static str] {
+    &["delta.exe", "delta.cmd", "delta.bat"]
+}
+
+#[cfg(not(windows))]
+fn delta_binary_names() -> &'static [&'static str] {
+    &["delta"]
 }
 
 #[cfg(windows)]
@@ -92,6 +114,19 @@ mod tests {
         result
     }
 
+    fn with_delta_bin_override<T>(value: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os("GLOWMUX_DELTA_BIN");
+        std::env::set_var("GLOWMUX_DELTA_BIN", value);
+        let result = f();
+        if let Some(previous) = previous {
+            std::env::set_var("GLOWMUX_DELTA_BIN", previous);
+        } else {
+            std::env::remove_var("GLOWMUX_DELTA_BIN");
+        }
+        result
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -127,6 +162,16 @@ mod tests {
         with_git_bin_override("/tmp/custom-git", || {
             let cmd = git_command();
             assert_eq!(cmd.get_program(), PathBuf::from("/tmp/custom-git"));
+        });
+    }
+
+    #[test]
+    fn delta_binary_allows_override() {
+        with_delta_bin_override("/opt/homebrew/bin/delta", || {
+            assert_eq!(
+                delta_binary(),
+                Some(OsString::from("/opt/homebrew/bin/delta"))
+            );
         });
     }
 }

@@ -16,6 +16,7 @@ pub struct ConfigFile {
     pub keybindings: KeybindingsConfig,
     pub ai_title_engine: AiTitleEngineConfig,
     pub filetree: FileTreeConfig,
+    pub preview: PreviewConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -300,11 +301,25 @@ pub struct FileTreeConfig {
     pub editor: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PreviewConfig {
+    pub prefer_delta: bool,
+}
+
 impl Default for FileTreeConfig {
     fn default() -> Self {
         Self {
             enter_action: "preview".to_string(),
             editor: "nvim".to_string(),
+        }
+    }
+}
+
+impl Default for PreviewConfig {
+    fn default() -> Self {
+        Self {
+            prefer_delta: false,
         }
     }
 }
@@ -508,14 +523,12 @@ impl ConfigFile {
         if let Some(path) = config_path {
             if path.exists() {
                 match std::fs::read_to_string(&path) {
-                    Ok(content) => {
-                        match toml::from_str::<ConfigFile>(&content) {
-                            Ok(config) => return config,
-                            Err(e) => {
-                                eprintln!("glowmux: config parse error (using defaults): {}", e);
-                            }
+                    Ok(content) => match toml::from_str::<ConfigFile>(&content) {
+                        Ok(config) => return config,
+                        Err(e) => {
+                            eprintln!("glowmux: config parse error (using defaults): {}", e);
                         }
-                    }
+                    },
                     Err(e) => {
                         eprintln!("glowmux: config read error (using defaults): {}", e);
                     }
@@ -560,6 +573,7 @@ mod tests {
         assert!(config.features.status_bg_color);
         assert!(config.features.status_bar);
         assert!(config.features.zoom);
+        assert!(!config.preview.prefer_delta);
         assert_eq!(config.terminal.scrollback, 10000);
         assert_eq!(config.layout.breakpoint_stack, 120);
         assert_eq!(config.ai.provider, "ollama");
@@ -574,10 +588,14 @@ scrollback = 5000
 
 [features]
 ai_title = false
+
+[preview]
+prefer_delta = true
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(config.terminal.scrollback, 5000);
         assert!(!config.features.ai_title);
+        assert!(config.preview.prefer_delta);
         assert!(!config.features.auto_worktree);
         assert_eq!(config.layout.file_tree_width, 20);
     }

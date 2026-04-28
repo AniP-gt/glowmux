@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use ratatui::style::Color;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use syntect::easy::HighlightLines;
@@ -33,9 +34,18 @@ pub enum DiffLineKind {
 
 /// One line of rendered diff output.
 #[derive(Debug, Clone)]
+pub struct DiffStyledSpan {
+    pub text: String,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct DiffLine {
     pub text: String,
     pub kind: DiffLineKind,
+    pub styled_spans: Vec<DiffStyledSpan>,
 }
 
 /// File preview state.
@@ -235,7 +245,7 @@ impl Preview {
         self.last_diff_loaded_at = None;
     }
 
-    pub fn toggle_diff_for(&mut self, git_cwd: &Path) -> bool {
+    pub fn toggle_diff_for(&mut self, git_cwd: &Path, prefer_delta: bool) -> bool {
         let Some(path) = self.file_path.clone() else {
             return false;
         };
@@ -245,7 +255,7 @@ impl Preview {
             return true;
         }
         if self.diff_lines.is_empty() || self.diff_git_cwd.as_deref() != Some(git_cwd) {
-            if let Some(lines) = crate::git_diff::load_diff_for(&path, git_cwd) {
+            if let Some(lines) = crate::git_diff::load_diff_for(&path, git_cwd, prefer_delta) {
                 self.diff_lines = lines;
                 self.diff_git_cwd = Some(git_cwd.to_path_buf());
                 self.last_diff_loaded_at = Some(Instant::now());

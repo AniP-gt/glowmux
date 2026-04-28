@@ -153,3 +153,6 @@ update_interval_sec = 30
 # preview | editor | neovim | choose
 enter_action = "preview"
 editor = "nvim"
+
+[preview]
+prefer_delta = false

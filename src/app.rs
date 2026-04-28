@@ -24,19 +24,36 @@ pub enum AppEvent {
     /// Shell changed working directory (pane_id, new path).
     CwdChanged(usize, PathBuf),
     /// Hook event received from Unix socket server.
-    HookReceived { pane_id: usize, event: HookEvent },
+    HookReceived {
+        pane_id: usize,
+        event: HookEvent,
+        context: crate::hooks::HookContext,
+    },
     /// AI title generation completed (None = generation failed/timed out).
-    AiTitleGenerated { pane_id: usize, title: Option<String> },
+    AiTitleGenerated {
+        pane_id: usize,
+        title: Option<String>,
+    },
     /// AI branch name generation completed.
     BranchNameGenerated { branch: String },
     /// Async worktree creation completed successfully.
-    WorktreeCreated { pane_id: usize, cwd: std::path::PathBuf, branch_name: String },
+    WorktreeCreated {
+        pane_id: usize,
+        cwd: std::path::PathBuf,
+        branch_name: String,
+    },
     /// Async worktree creation failed.
-    WorktreeCreateFailed { pane_id: usize, branch_name: String, error: String },
+    WorktreeCreateFailed {
+        pane_id: usize,
+        branch_name: String,
+        error: String,
+    },
     /// Worktree branch has been merged into main.
     WorktreeMerged { worktree_path: std::path::PathBuf },
     /// Worktree list refresh completed.
-    WorktreesListed { worktrees: Vec<crate::worktree::WorktreeInfo> },
+    WorktreesListed {
+        worktrees: Vec<crate::worktree::WorktreeInfo>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,6 +77,25 @@ impl Default for PaneState {
             dismissed: false,
         }
     }
+}
+
+fn resolve_pane_status(
+    hook_status: PaneStatus,
+    claude_state: &crate::claude_monitor::ClaudeState,
+) -> PaneStatus {
+    if claude_state.is_working {
+        return PaneStatus::Running;
+    }
+
+    if hook_status != PaneStatus::Idle {
+        return hook_status;
+    }
+
+    if claude_state.total_tokens() > 0 {
+        return PaneStatus::Done;
+    }
+
+    PaneStatus::Idle
 }
 
 pub const FEATURES: &[(&str, &str)] = &[
@@ -92,7 +128,10 @@ pub const SETTINGS_ITEMS: &[(&str, &str)] = &[
     ("terminal.scrollback", "Scrollback Lines"),
     ("layout.breakpoint_stack", "Layout Breakpoint (stack)"),
     ("layout.breakpoint_split2", "Layout Breakpoint (split2)"),
-    ("ai_title_engine.update_interval_sec", "AI Title Update Interval (sec)"),
+    (
+        "ai_title_engine.update_interval_sec",
+        "AI Title Update Interval (sec)",
+    ),
     ("ai_title_engine.max_chars", "AI Title Max Chars"),
 ];
 
@@ -261,10 +300,11 @@ pub enum DragTarget {
     Scrollbar(usize, Rect), // pane_id, inner area
 }
 
-
 /// Binary tree node for pane layout.
 pub enum LayoutNode {
-    Leaf { pane_id: usize },
+    Leaf {
+        pane_id: usize,
+    },
     Split {
         direction: SplitDirection,
         ratio: f32, // 0.0..1.0, portion allocated to first child
@@ -288,7 +328,12 @@ impl LayoutNode {
     pub fn calculate_rects(&self, area: Rect) -> Vec<(usize, Rect)> {
         match self {
             LayoutNode::Leaf { pane_id } => vec![(*pane_id, area)],
-            LayoutNode::Split { direction, ratio, first, second } => {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
                 let (first_area, second_area) = split_rect(area, *direction, *ratio);
                 let mut result = first.calculate_rects(first_area);
                 result.extend(second.calculate_rects(second_area));
@@ -297,7 +342,12 @@ impl LayoutNode {
         }
     }
 
-    pub fn split_pane(&mut self, target_id: usize, new_id: usize, direction: SplitDirection) -> bool {
+    pub fn split_pane(
+        &mut self,
+        target_id: usize,
+        new_id: usize,
+        direction: SplitDirection,
+    ) -> bool {
         match self {
             LayoutNode::Leaf { pane_id } => {
                 if *pane_id == target_id {
@@ -326,14 +376,16 @@ impl LayoutNode {
             LayoutNode::Split { first, second, .. } => {
                 if let LayoutNode::Leaf { pane_id } = first.as_ref() {
                     if *pane_id == target_id {
-                        let second = std::mem::replace(second.as_mut(), LayoutNode::Leaf { pane_id: 0 });
+                        let second =
+                            std::mem::replace(second.as_mut(), LayoutNode::Leaf { pane_id: 0 });
                         *self = second;
                         return true;
                     }
                 }
                 if let LayoutNode::Leaf { pane_id } = second.as_ref() {
                     if *pane_id == target_id {
-                        let first = std::mem::replace(first.as_mut(), LayoutNode::Leaf { pane_id: 0 });
+                        let first =
+                            std::mem::replace(first.as_mut(), LayoutNode::Leaf { pane_id: 0 });
                         *self = first;
                         return true;
                     }
@@ -357,7 +409,13 @@ impl LayoutNode {
         path: &mut Vec<bool>, // false=first, true=second
         result: &mut Vec<(u16, SplitDirection, Vec<bool>)>,
     ) {
-        if let LayoutNode::Split { direction, ratio, first, second } = self {
+        if let LayoutNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } = self
+        {
             let (first_area, second_area) = split_rect(area, *direction, *ratio);
 
             // The boundary is at the edge between first and second
@@ -395,7 +453,12 @@ impl LayoutNode {
     pub fn clone_layout(&self) -> LayoutNode {
         match self {
             LayoutNode::Leaf { pane_id } => LayoutNode::Leaf { pane_id: *pane_id },
-            LayoutNode::Split { direction, ratio, first, second } => LayoutNode::Split {
+            LayoutNode::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => LayoutNode::Split {
                 direction: *direction,
                 ratio: *ratio,
                 first: Box::new(first.clone_layout()),
@@ -433,7 +496,6 @@ fn split_rect(area: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect)
         }
     }
 }
-
 
 /// What the current text selection is anchored to.
 #[derive(Debug, Clone, PartialEq)]
@@ -498,6 +560,13 @@ impl TextSelection {
     }
 }
 
+fn preview_line_count(preview: &crate::preview::Preview) -> usize {
+    if preview.diff_mode && !preview.diff_lines.is_empty() {
+        preview.diff_lines.len()
+    } else {
+        preview.lines.len()
+    }
+}
 
 /// A workspace holds all state for one tab.
 #[allow(dead_code)]
@@ -568,7 +637,6 @@ impl Workspace {
         self.custom_name.as_deref().unwrap_or(&self.name)
     }
 }
-
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
@@ -743,7 +811,9 @@ impl App {
                             let tx = app.event_tx.clone();
                             if restore_session_workspaces(
                                 &mut app, &session, pane_rows, pane_cols, &tx,
-                            ).is_ok() {
+                            )
+                            .is_ok()
+                            {
                                 session_restored = true;
                             }
                         }
@@ -883,7 +953,11 @@ impl App {
         // PTY size drift from the actually-painted pane size.
         const MIN_PANE_AREA_WIDTH: u16 = 20;
         let tab_h = 1u16;
-        let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() { 1 } else { 0 };
+        let status_h: u16 = if self.status_bar_visible || self.rename_input.is_some() {
+            1
+        } else {
+            0
+        };
         let main_h = rows.saturating_sub(tab_h + status_h);
 
         let mut has_tree = self.ws().file_tree_visible;
@@ -999,7 +1073,11 @@ impl App {
             return self.handle_close_confirm_key(key);
         }
         // Worktree cleanup dialog
-        if self.worktree_cleanup_dialog.as_ref().is_some_and(|d| d.visible) {
+        if self
+            .worktree_cleanup_dialog
+            .as_ref()
+            .is_some_and(|d| d.visible)
+        {
             return self.handle_worktree_cleanup_key(key);
         }
 
@@ -1082,13 +1160,9 @@ impl App {
                             .get(&pane_id)
                             .map(|p| extract_selected_text(p, sr, sc, er, ec))
                             .unwrap_or_default(),
-                        SelectionTarget::Preview => extract_preview_selected_text(
-                            &self.ws().preview,
-                            sr,
-                            sc,
-                            er,
-                            ec,
-                        ),
+                        SelectionTarget::Preview => {
+                            extract_preview_selected_text(&self.ws().preview, sr, sc, er, ec)
+                        }
                     };
                     if !text.is_empty() {
                         self.copy_to_clipboard(&text);
@@ -1104,16 +1178,28 @@ impl App {
         if self.key_matches(key, &self.config.keybindings.clipboard_copy) {
             let content = {
                 let pane_id = self.ws().focused_pane_id;
-                self.ws().panes.get(&pane_id)
-                    .map(|p| p.parser.lock().unwrap_or_else(|e| e.into_inner()).screen().contents())
+                self.ws()
+                    .panes
+                    .get(&pane_id)
+                    .map(|p| {
+                        p.parser
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .screen()
+                            .contents()
+                    })
                     .unwrap_or_default()
             };
             if content.trim().is_empty() {
-                self.status_flash = Some(("No content to copy".to_string(), std::time::Instant::now()));
+                self.status_flash =
+                    Some(("No content to copy".to_string(), std::time::Instant::now()));
             } else {
                 self.copy_to_clipboard(&content);
                 let lines = content.lines().count();
-                self.status_flash = Some((format!("Copied ({} lines)", lines), std::time::Instant::now()));
+                self.status_flash = Some((
+                    format!("Copied ({} lines)", lines),
+                    std::time::Instant::now(),
+                ));
             }
             self.dirty = true;
             return Ok(true);
@@ -1305,7 +1391,10 @@ impl App {
             if multi_pane || multi_tab {
                 let pane_id = self.ws().focused_pane_id;
                 if self.config.worktree.close_confirm {
-                    let worktree_path = self.ws().panes.get(&pane_id)
+                    let worktree_path = self
+                        .ws()
+                        .panes
+                        .get(&pane_id)
                         .and_then(|p| p.worktree_path.clone());
                     self.close_confirm_dialog = CloseConfirmDialog {
                         visible: true,
@@ -1350,13 +1439,21 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.rename_input = None;
-                if needs_relayout { self.mark_layout_change(); }
+                if needs_relayout {
+                    self.mark_layout_change();
+                }
             }
             KeyCode::Enter => {
                 let trimmed = buf.trim().to_string();
-                self.ws_mut().custom_name = if trimmed.is_empty() { None } else { Some(trimmed) };
+                self.ws_mut().custom_name = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
                 self.rename_input = None;
-                if needs_relayout { self.mark_layout_change(); }
+                if needs_relayout {
+                    self.mark_layout_change();
+                }
             }
             KeyCode::Backspace => {
                 buf.pop();
@@ -1365,7 +1462,10 @@ impl App {
                 // Ignore chars combined with Ctrl/Alt so shortcuts like
                 // Ctrl+C don't leak into the buffer as literal letters.
                 // Shift is fine — that's just uppercase.
-                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
                     return true;
                 }
                 // Cap at something sane so a stuck key can't grow the tab bar forever.
@@ -1384,11 +1484,15 @@ impl App {
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
                 KeyCode::Char('d') | KeyCode::Char('D') => {
-                    for _ in 0..5 { self.ws_mut().file_tree.move_down(); }
+                    for _ in 0..5 {
+                        self.ws_mut().file_tree.move_down();
+                    }
                     return Ok(true);
                 }
                 KeyCode::Char('u') | KeyCode::Char('U') => {
-                    for _ in 0..5 { self.ws_mut().file_tree.move_up(); }
+                    for _ in 0..5 {
+                        self.ws_mut().file_tree.move_up();
+                    }
                     return Ok(true);
                 }
                 _ => {}
@@ -1421,7 +1525,10 @@ impl App {
                         other => {
                             if other != "preview" {
                                 self.status_flash = Some((
-                                    format!("unknown enter_action '{}'; falling back to preview", other),
+                                    format!(
+                                        "unknown enter_action '{}'; falling back to preview",
+                                        other
+                                    ),
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -1462,7 +1569,11 @@ impl App {
                     self.ws_mut().preview.load(&path, picker.as_mut());
                     self.image_picker = picker;
 
-                    let had_diff = self.ws_mut().preview.toggle_diff_for(&git_cwd);
+                    let prefer_delta = self.config.preview.prefer_delta;
+                    let had_diff = self
+                        .ws_mut()
+                        .preview
+                        .toggle_diff_for(&git_cwd, prefer_delta);
                     if !had_diff {
                         self.status_flash = Some((
                             "no diff for selected file".to_string(),
@@ -1512,11 +1623,13 @@ impl App {
                 Ok(true)
             }
             // Ctrl+D / Ctrl+U — half-page scroll (5 lines), overrides global split bindings.
-            (KeyModifiers::CONTROL, KeyCode::Char('d')) | (KeyModifiers::CONTROL, KeyCode::Char('D')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('d'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('D')) => {
                 self.ws_mut().preview.scroll_down(5);
                 Ok(true)
             }
-            (KeyModifiers::CONTROL, KeyCode::Char('u')) | (KeyModifiers::CONTROL, KeyCode::Char('U')) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('u'))
+            | (KeyModifiers::CONTROL, KeyCode::Char('U')) => {
                 self.ws_mut().preview.scroll_up(5);
                 Ok(true)
             }
@@ -1587,10 +1700,8 @@ impl App {
                 if let Some(path) = self.ws().preview.file_path.clone() {
                     let full = path.to_string_lossy().to_string();
                     self.copy_to_clipboard(&full);
-                    self.status_flash = Some((
-                        format!("Copied path: {}", full),
-                        std::time::Instant::now(),
-                    ));
+                    self.status_flash =
+                        Some((format!("Copied path: {}", full), std::time::Instant::now()));
                 }
                 Ok(true)
             }
@@ -1603,7 +1714,6 @@ impl App {
             _ => Ok(true),
         }
     }
-
 
     fn new_tab(&mut self) -> Result<()> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1643,7 +1753,6 @@ impl App {
             self.active_tab = self.workspaces.len() - 1;
         }
     }
-
 
     fn toggle_file_tree(&mut self) {
         let ws = self.ws_mut();
@@ -1711,7 +1820,10 @@ impl App {
         self.next_pane_id = self.next_pane_id.wrapping_add(1);
 
         // Inherit CWD from the focused pane
-        let parent_cwd = self.ws().panes.get(&self.ws().focused_pane_id)
+        let parent_cwd = self
+            .ws()
+            .panes
+            .get(&self.ws().focused_pane_id)
             .map(|p| p.cwd.clone());
 
         let pane = Pane::new_with_cwd(new_id, 10, 40, self.event_tx.clone(), parent_cwd)?;
@@ -1808,7 +1920,9 @@ impl App {
             return None;
         }
         if count == 1 {
-            return Some(LayoutNode::Leaf { pane_id: pane_ids[0] });
+            return Some(LayoutNode::Leaf {
+                pane_id: pane_ids[0],
+            });
         }
 
         match mode {
@@ -1816,12 +1930,19 @@ impl App {
                 Self::build_stack(pane_ids, SplitDirection::Horizontal)
             }
             LayoutMode::TwoSplit => {
-                let left = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                let left = LayoutNode::Leaf {
+                    pane_id: pane_ids[0],
+                };
                 let right = if count == 2 {
-                    LayoutNode::Leaf { pane_id: pane_ids[1] }
+                    LayoutNode::Leaf {
+                        pane_id: pane_ids[1],
+                    }
                 } else {
-                    Self::build_stack(&pane_ids[1..], SplitDirection::Horizontal)
-                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] })
+                    Self::build_stack(&pane_ids[1..], SplitDirection::Horizontal).unwrap_or(
+                        LayoutNode::Leaf {
+                            pane_id: pane_ids[1],
+                        },
+                    )
                 };
                 Some(LayoutNode::Split {
                     direction: SplitDirection::Vertical,
@@ -1835,14 +1956,22 @@ impl App {
                     let top = LayoutNode::Split {
                         direction: SplitDirection::Vertical,
                         ratio: 0.5,
-                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
-                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+                        first: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[0],
+                        }),
+                        second: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[1],
+                        }),
                     };
                     let bottom = LayoutNode::Split {
                         direction: SplitDirection::Vertical,
                         ratio: 0.5,
-                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[2] }),
-                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[3] }),
+                        first: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[2],
+                        }),
+                        second: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[3],
+                        }),
                     };
                     Some(LayoutNode::Split {
                         direction: SplitDirection::Horizontal,
@@ -1854,14 +1983,20 @@ impl App {
                     let top = LayoutNode::Split {
                         direction: SplitDirection::Vertical,
                         ratio: 0.5,
-                        first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
-                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+                        first: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[0],
+                        }),
+                        second: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[1],
+                        }),
                     };
                     Some(LayoutNode::Split {
                         direction: SplitDirection::Horizontal,
                         ratio: 0.5,
                         first: Box::new(top),
-                        second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[2] }),
+                        second: Box::new(LayoutNode::Leaf {
+                            pane_id: pane_ids[2],
+                        }),
                     })
                 } else {
                     Self::build_layout_node(LayoutMode::TwoSplit, pane_ids)
@@ -1869,9 +2004,13 @@ impl App {
             }
             LayoutMode::MainSub => {
                 if count >= 3 {
-                    let main = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                    let main = LayoutNode::Leaf {
+                        pane_id: pane_ids[0],
+                    };
                     let sub = Self::build_stack(&pane_ids[1..], SplitDirection::Horizontal)
-                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] });
+                        .unwrap_or(LayoutNode::Leaf {
+                            pane_id: pane_ids[1],
+                        });
                     Some(LayoutNode::Split {
                         direction: SplitDirection::Vertical,
                         ratio: 0.6,
@@ -1884,9 +2023,13 @@ impl App {
             }
             LayoutMode::BigOnePlusThree => {
                 if count >= 4 {
-                    let big = LayoutNode::Leaf { pane_id: pane_ids[0] };
+                    let big = LayoutNode::Leaf {
+                        pane_id: pane_ids[0],
+                    };
                     let small = Self::build_stack(&pane_ids[1..4], SplitDirection::Horizontal)
-                        .unwrap_or(LayoutNode::Leaf { pane_id: pane_ids[1] });
+                        .unwrap_or(LayoutNode::Leaf {
+                            pane_id: pane_ids[1],
+                        });
                     Some(LayoutNode::Split {
                         direction: SplitDirection::Vertical,
                         ratio: 0.65,
@@ -1905,12 +2048,18 @@ impl App {
     fn build_stack(pane_ids: &[usize], direction: SplitDirection) -> Option<LayoutNode> {
         match pane_ids.len() {
             0 => None,
-            1 => Some(LayoutNode::Leaf { pane_id: pane_ids[0] }),
+            1 => Some(LayoutNode::Leaf {
+                pane_id: pane_ids[0],
+            }),
             2 => Some(LayoutNode::Split {
                 direction,
                 ratio: 0.5,
-                first: Box::new(LayoutNode::Leaf { pane_id: pane_ids[0] }),
-                second: Box::new(LayoutNode::Leaf { pane_id: pane_ids[1] }),
+                first: Box::new(LayoutNode::Leaf {
+                    pane_id: pane_ids[0],
+                }),
+                second: Box::new(LayoutNode::Leaf {
+                    pane_id: pane_ids[1],
+                }),
             }),
             _ => {
                 let mid = pane_ids.len() / 2;
@@ -1991,8 +2140,7 @@ impl App {
                 self.apply_layout_mode(LayoutMode::Auto);
                 self.layout_picker.visible = false;
             }
-            (KeyModifiers::NONE, KeyCode::Esc)
-            | (KeyModifiers::NONE, KeyCode::Char('q')) => {
+            (KeyModifiers::NONE, KeyCode::Esc) | (KeyModifiers::NONE, KeyCode::Char('q')) => {
                 self.layout_picker.visible = false;
             }
             (KeyModifiers::NONE, KeyCode::Char('j')) | (KeyModifiers::NONE, KeyCode::Down) => {
@@ -2030,8 +2178,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.feature_toggle.selected =
-                    (self.feature_toggle.selected + 1) % FEATURES.len();
+                self.feature_toggle.selected = (self.feature_toggle.selected + 1) % FEATURES.len();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.feature_toggle.selected = if self.feature_toggle.selected == 0 {
@@ -2075,7 +2222,8 @@ impl App {
         if self.settings_panel.editing {
             match key.code {
                 KeyCode::Enter => {
-                    let Some(&(key_name, _)) = SETTINGS_ITEMS.get(self.settings_panel.selected) else {
+                    let Some(&(key_name, _)) = SETTINGS_ITEMS.get(self.settings_panel.selected)
+                    else {
                         self.settings_panel.editing = false;
                         self.settings_panel.edit_buffer.clear();
                         self.dirty = true;
@@ -2137,7 +2285,9 @@ impl App {
             "terminal.scrollback" => self.config.terminal.scrollback.to_string(),
             "layout.breakpoint_stack" => self.config.layout.breakpoint_stack.to_string(),
             "layout.breakpoint_split2" => self.config.layout.breakpoint_split2.to_string(),
-            "ai_title_engine.update_interval_sec" => self.config.ai_title_engine.update_interval_sec.to_string(),
+            "ai_title_engine.update_interval_sec" => {
+                self.config.ai_title_engine.update_interval_sec.to_string()
+            }
             "ai_title_engine.max_chars" => self.config.ai_title_engine.max_chars.to_string(),
             _ => String::new(),
         }
@@ -2181,7 +2331,8 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Tab => {
-                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
+                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field
+                {
                     PaneCreateField::BranchName => PaneCreateField::BaseBranch,
                     PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
                     PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
@@ -2193,7 +2344,8 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::BackTab => {
-                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field {
+                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field
+                {
                     PaneCreateField::BranchName => PaneCreateField::CancelButton,
                     PaneCreateField::BaseBranch => PaneCreateField::BranchName,
                     PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
@@ -2221,7 +2373,9 @@ impl App {
                             self.start_branch_name_generation();
                         }
                     }
-                    PaneCreateField::OkButton | PaneCreateField::BranchName | PaneCreateField::BaseBranch => {
+                    PaneCreateField::OkButton
+                    | PaneCreateField::BranchName
+                    | PaneCreateField::BaseBranch => {
                         if !self.pane_create_dialog.generating_name {
                             let branch = self.pane_create_dialog.branch_name.clone();
                             let worktree = self.pane_create_dialog.worktree_enabled;
@@ -2235,23 +2389,21 @@ impl App {
                     _ => {}
                 }
             }
-            KeyCode::Backspace => {
-                match self.pane_create_dialog.focused_field {
-                    PaneCreateField::BranchName => {
-                        self.pane_create_dialog.branch_name.pop();
-                        self.dirty = true;
-                    }
-                    PaneCreateField::BaseBranch => {
-                        self.pane_create_dialog.base_branch.pop();
-                        self.dirty = true;
-                    }
-                    PaneCreateField::AgentField => {
-                        self.pane_create_dialog.agent.pop();
-                        self.dirty = true;
-                    }
-                    _ => {}
+            KeyCode::Backspace => match self.pane_create_dialog.focused_field {
+                PaneCreateField::BranchName => {
+                    self.pane_create_dialog.branch_name.pop();
+                    self.dirty = true;
                 }
-            }
+                PaneCreateField::BaseBranch => {
+                    self.pane_create_dialog.base_branch.pop();
+                    self.dirty = true;
+                }
+                PaneCreateField::AgentField => {
+                    self.pane_create_dialog.agent.pop();
+                    self.dirty = true;
+                }
+                _ => {}
+            },
             KeyCode::Char(c) => {
                 match self.pane_create_dialog.focused_field {
                     PaneCreateField::BranchName => {
@@ -2261,7 +2413,8 @@ impl App {
                         }
                     }
                     PaneCreateField::BaseBranch => {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' || c == '.' {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' || c == '.'
+                        {
                             self.pane_create_dialog.base_branch.push(c);
                             self.dirty = true;
                         }
@@ -2316,8 +2469,10 @@ impl App {
                                     let root = repo_root.clone();
                                     handle.spawn(async move {
                                         let result = tokio::task::spawn_blocking(move || {
-                                            crate::worktree::WorktreeManager::new().remove(&path, &root)
-                                        }).await;
+                                            crate::worktree::WorktreeManager::new()
+                                                .remove(&path, &root)
+                                        })
+                                        .await;
                                         if let Ok(Err(e)) = result {
                                             eprintln!("glowmux: worktree remove failed: {}", e);
                                         }
@@ -2328,7 +2483,10 @@ impl App {
                                 self.worktree_cleanup_dialog = Some(WorktreeCleanupDialog {
                                     visible: true,
                                     worktree_path: wt_path.clone(),
-                                    branch: self.ws().panes.values()
+                                    branch: self
+                                        .ws()
+                                        .panes
+                                        .values()
                                         .find(|p| p.worktree_path.as_ref() == Some(&wt_path))
                                         .and_then(|p| p.branch_name.clone())
                                         .unwrap_or_default(),
@@ -2398,7 +2556,8 @@ impl App {
                             handle.spawn(async move {
                                 let result = tokio::task::spawn_blocking(move || {
                                     crate::worktree::WorktreeManager::new().remove(&p, &root)
-                                }).await;
+                                })
+                                .await;
                                 if let Ok(Err(e)) = result {
                                     eprintln!("glowmux: worktree remove failed: {}", e);
                                 }
@@ -2419,8 +2578,8 @@ impl App {
     fn start_branch_name_generation(&mut self) {
         // Respect the feature gate: worktree_ai_name OR ai.worktree_name.enabled.
         // Either flag turns the AI Generate button into a real call.
-        let feature_on = self.config.features.worktree_ai_name
-            || self.config.ai.worktree_name.enabled;
+        let feature_on =
+            self.config.features.worktree_ai_name || self.config.ai.worktree_name.enabled;
         if !feature_on {
             self.pane_create_dialog.error_msg =
                 Some("AI worktree name disabled (features.worktree_ai_name)".to_string());
@@ -2455,9 +2614,8 @@ impl App {
         let cwd = self.ws().cwd.clone();
         let pane_rows = rows.saturating_sub(5);
         let pane_cols = cols.saturating_sub(2);
-        let mut pane = crate::pane::Pane::new(
-            pane_id, pane_rows, pane_cols, self.event_tx.clone(),
-        )?;
+        let mut pane =
+            crate::pane::Pane::new(pane_id, pane_rows, pane_cols, self.event_tx.clone())?;
 
         if !branch_name.is_empty() {
             pane.branch_name = Some(branch_name.clone());
@@ -2470,6 +2628,7 @@ impl App {
             .layout
             .split_pane(focused_id, pane_id, SplitDirection::Vertical);
         self.ws_mut().focused_pane_id = pane_id;
+        self.on_workspace_focus_context_changed();
         self.mark_layout_change();
 
         let has_branch = !branch_name.is_empty();
@@ -2489,16 +2648,29 @@ impl App {
                     let result = tokio::task::spawn_blocking(move || {
                         let mgr = crate::worktree::WorktreeManager::new();
                         mgr.create_with_options(&repo_root, &branch_clone, &opts_clone)
-                    }).await;
+                    })
+                    .await;
                     match result {
                         Ok(Ok(path)) => {
-                            let _ = tx.send(AppEvent::WorktreeCreated { pane_id, cwd: path, branch_name: branch });
+                            let _ = tx.send(AppEvent::WorktreeCreated {
+                                pane_id,
+                                cwd: path,
+                                branch_name: branch,
+                            });
                         }
                         Ok(Err(e)) => {
-                            let _ = tx.send(AppEvent::WorktreeCreateFailed { pane_id, branch_name: branch, error: e.to_string() });
+                            let _ = tx.send(AppEvent::WorktreeCreateFailed {
+                                pane_id,
+                                branch_name: branch,
+                                error: e.to_string(),
+                            });
                         }
                         Err(e) => {
-                            let _ = tx.send(AppEvent::WorktreeCreateFailed { pane_id, branch_name: branch, error: e.to_string() });
+                            let _ = tx.send(AppEvent::WorktreeCreateFailed {
+                                pane_id,
+                                branch_name: branch,
+                                error: e.to_string(),
+                            });
                         }
                     }
                 });
@@ -2626,7 +2798,10 @@ impl App {
     fn focus_pane_in_direction(&mut self, dir: Direction) {
         let focused = self.ws().focused_pane_id;
 
-        let Some(&(_, current_rect)) = self.ws().last_pane_rects.iter()
+        let Some(&(_, current_rect)) = self
+            .ws()
+            .last_pane_rects
+            .iter()
             .find(|(id, _)| *id == focused)
         else {
             return;
@@ -2647,10 +2822,20 @@ impl App {
             let py = rect.y as i32 + rect.height as i32 / 2;
 
             let is_candidate = match dir {
-                Direction::Left  => px < cx && rect.x as i32 + rect.width as i32 <= current_rect.x as i32 + 2,
-                Direction::Right => px > cx && rect.x as i32 >= current_rect.x as i32 + current_rect.width as i32 - 2,
-                Direction::Up    => py < cy && rect.y as i32 + rect.height as i32 <= current_rect.y as i32 + 2,
-                Direction::Down  => py > cy && rect.y as i32 >= current_rect.y as i32 + current_rect.height as i32 - 2,
+                Direction::Left => {
+                    px < cx && rect.x as i32 + rect.width as i32 <= current_rect.x as i32 + 2
+                }
+                Direction::Right => {
+                    px > cx
+                        && rect.x as i32 >= current_rect.x as i32 + current_rect.width as i32 - 2
+                }
+                Direction::Up => {
+                    py < cy && rect.y as i32 + rect.height as i32 <= current_rect.y as i32 + 2
+                }
+                Direction::Down => {
+                    py > cy
+                        && rect.y as i32 >= current_rect.y as i32 + current_rect.height as i32 - 2
+                }
             };
 
             if !is_candidate {
@@ -2782,7 +2967,6 @@ impl App {
         }
     }
 
-
     fn is_on_file_tree_border(&self, col: u16) -> bool {
         if let Some(rect) = self.ws().last_file_tree_rect {
             let border_col = rect.x + rect.width;
@@ -2807,17 +2991,27 @@ impl App {
         }
     }
 
-
     fn enter_copy_mode(&mut self) {
         let pane_id = self.ws().focused_pane_id;
-        let rect = self.ws().last_pane_rects.iter()
+        let rect = self
+            .ws()
+            .last_pane_rects
+            .iter()
             .find(|&&(id, _)| id == pane_id)
             .map(|&(_, r)| r);
 
-        enum SizeSource { Rect, Parser, Default }
+        enum SizeSource {
+            Rect,
+            Parser,
+            Default,
+        }
 
         let (screen_rows, screen_cols, source) = if let Some(rect) = rect {
-            (rect.height.saturating_sub(2), rect.width.saturating_sub(2), SizeSource::Rect)
+            (
+                rect.height.saturating_sub(2),
+                rect.width.saturating_sub(2),
+                SizeSource::Rect,
+            )
         } else if let Some(pane) = self.ws().panes.get(&pane_id) {
             let parser = pane.parser.lock().unwrap_or_else(|e| e.into_inner());
             let rows = parser.screen().size().0;
@@ -2863,8 +3057,14 @@ impl App {
         }
 
         let pane_id = self.copy_mode.as_ref().unwrap().pane_id;
-        let max_scrollback = self.ws().panes.get(&pane_id)
-            .map(|p| p.total_scrollback.load(std::sync::atomic::Ordering::Relaxed))
+        let max_scrollback = self
+            .ws()
+            .panes
+            .get(&pane_id)
+            .map(|p| {
+                p.total_scrollback
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
             .unwrap_or(0);
         let action = Self::move_copy_cursor(self.copy_mode.as_mut().unwrap(), key, max_scrollback);
 
@@ -2882,7 +3082,11 @@ impl App {
         Ok(true)
     }
 
-    fn move_copy_cursor(cm: &mut CopyModeState, key: KeyEvent, max_scrollback: usize) -> CopyModeAction {
+    fn move_copy_cursor(
+        cm: &mut CopyModeState,
+        key: KeyEvent,
+        max_scrollback: usize,
+    ) -> CopyModeAction {
         if cm.screen_rows == 0 {
             return CopyModeAction::Continue;
         }
@@ -2949,7 +3153,8 @@ impl App {
                 let half = cm.screen_rows / 2;
                 if cm.cursor_row < half && cm.scrollback_offset < max_scrollback {
                     let remaining = half - cm.cursor_row;
-                    cm.scrollback_offset = (cm.scrollback_offset + remaining as usize).min(max_scrollback);
+                    cm.scrollback_offset =
+                        (cm.scrollback_offset + remaining as usize).min(max_scrollback);
                     cm.cursor_row = 0;
                 } else {
                     cm.cursor_row = cm.cursor_row.saturating_sub(half);
@@ -2998,28 +3203,37 @@ impl App {
             parser.screen_mut().set_scrollback(cm.scrollback_offset);
             let screen = parser.screen();
 
-            let (start_row, start_col, end_row, end_col) = if let Some((sr, sc)) = cm.selection_start {
-                let min_r = sr.min(cm.cursor_row);
-                let max_r = sr.max(cm.cursor_row);
-                if cm.line_wise {
-                    (min_r, 0u16, max_r, cm.screen_cols)
-                } else {
-                    let (sc_norm, ec_norm) = if sr <= cm.cursor_row {
-                        (sc, cm.cursor_col)
+            let (start_row, start_col, end_row, end_col) =
+                if let Some((sr, sc)) = cm.selection_start {
+                    let min_r = sr.min(cm.cursor_row);
+                    let max_r = sr.max(cm.cursor_row);
+                    if cm.line_wise {
+                        (min_r, 0u16, max_r, cm.screen_cols)
                     } else {
-                        (cm.cursor_col, sc)
-                    };
-                    let end_col = ec_norm.saturating_add(1).min(cm.screen_cols);
-                    (min_r, sc_norm, max_r, end_col)
-                }
-            } else {
-                (cm.cursor_row, 0, cm.cursor_row, cm.screen_cols)
-            };
+                        let (sc_norm, ec_norm) = if sr <= cm.cursor_row {
+                            (sc, cm.cursor_col)
+                        } else {
+                            (cm.cursor_col, sc)
+                        };
+                        let end_col = ec_norm.saturating_add(1).min(cm.screen_cols);
+                        (min_r, sc_norm, max_r, end_col)
+                    }
+                } else {
+                    (cm.cursor_row, 0, cm.cursor_row, cm.screen_cols)
+                };
 
             let mut lines = Vec::new();
             for row in start_row..=end_row {
-                let col_start = if !cm.line_wise && row == start_row { start_col } else { 0 };
-                let col_end = if !cm.line_wise && row == end_row { end_col } else { cm.screen_cols };
+                let col_start = if !cm.line_wise && row == start_row {
+                    start_col
+                } else {
+                    0
+                };
+                let col_end = if !cm.line_wise && row == end_row {
+                    end_col
+                } else {
+                    cm.screen_cols
+                };
                 let mut line = String::new();
                 for col in col_start..col_end {
                     if let Some(cell) = screen.cell(row, col) {
@@ -3048,7 +3262,6 @@ impl App {
             ));
         }
     }
-
 
     fn open_pane_list_overlay(&mut self) {
         let pane_ids = self.ws().layout.collect_pane_ids();
@@ -3081,8 +3294,13 @@ impl App {
                 self.pane_list_overlay.selected = digit.min(len.saturating_sub(1));
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(&selected_id) = self.pane_list_overlay.pane_ids.get(self.pane_list_overlay.selected) {
+                if let Some(&selected_id) = self
+                    .pane_list_overlay
+                    .pane_ids
+                    .get(self.pane_list_overlay.selected)
+                {
                     self.ws_mut().focused_pane_id = selected_id;
+                    self.on_workspace_focus_context_changed();
                 }
                 self.pane_list_overlay.visible = false;
             }
@@ -3094,7 +3312,6 @@ impl App {
         self.dirty = true;
         Ok(true)
     }
-
 
     fn sanitize_shell_arg(s: &str) -> Option<String> {
         if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
@@ -3146,10 +3363,13 @@ impl App {
     fn handle_filetree_action_popup_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
-                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + 1) % FILETREE_ACTION_COUNT;
+                self.filetree_action_popup.selected =
+                    (self.filetree_action_popup.selected + 1) % FILETREE_ACTION_COUNT;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.filetree_action_popup.selected = (self.filetree_action_popup.selected + FILETREE_ACTION_COUNT - 1) % FILETREE_ACTION_COUNT;
+                self.filetree_action_popup.selected =
+                    (self.filetree_action_popup.selected + FILETREE_ACTION_COUNT - 1)
+                        % FILETREE_ACTION_COUNT;
             }
             KeyCode::Enter => {
                 let path = self.filetree_action_popup.file_path.clone();
@@ -3179,7 +3399,9 @@ impl App {
             let needs_relayout = !self.status_bar_visible;
             self.rename_input = None;
             self.dirty = true;
-            if needs_relayout { self.mark_layout_change(); }
+            if needs_relayout {
+                self.mark_layout_change();
+            }
         }
 
         match mouse.kind {
@@ -3192,8 +3414,10 @@ impl App {
 
                 // Check tab bar clicks
                 for &(tab_idx, rect) in &self.last_tab_rects {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         let now = Instant::now();
                         let is_double = matches!(
@@ -3219,8 +3443,10 @@ impl App {
 
                 // Check [+] new tab button
                 if let Some(rect) = self.last_new_tab_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         let _ = self.new_tab();
                         return;
@@ -3251,12 +3477,16 @@ impl App {
                     for (boundary, direction, path) in boundaries {
                         let on_border = match direction {
                             SplitDirection::Vertical => {
-                                col >= boundary.saturating_sub(1) && col <= boundary
-                                    && row >= pane_area.y && row < pane_area.y + pane_area.height
+                                col >= boundary.saturating_sub(1)
+                                    && col <= boundary
+                                    && row >= pane_area.y
+                                    && row < pane_area.y + pane_area.height
                             }
                             SplitDirection::Horizontal => {
-                                row >= boundary.saturating_sub(1) && row <= boundary
-                                    && col >= pane_area.x && col < pane_area.x + pane_area.width
+                                row >= boundary.saturating_sub(1)
+                                    && row <= boundary
+                                    && col >= pane_area.x
+                                    && col < pane_area.x + pane_area.width
                             }
                         };
                         if on_border {
@@ -3268,8 +3498,10 @@ impl App {
 
                 // Check file tree click
                 if let Some(rect) = self.ws().last_file_tree_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().focus_target = FocusTarget::FileTree;
                         let inner_y = row.saturating_sub(rect.y + 1);
@@ -3292,8 +3524,10 @@ impl App {
 
                 // Check preview click
                 if let Some(rect) = self.ws().last_preview_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().focus_target = FocusTarget::Preview;
                         return;
@@ -3303,8 +3537,10 @@ impl App {
                 // Check pane clicks
                 let pane_rects = self.ws().last_pane_rects.clone();
                 for (pane_id, rect) in pane_rects {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().focused_pane_id = pane_id;
                         self.ws_mut().focus_target = FocusTarget::Pane;
@@ -3314,7 +3550,12 @@ impl App {
                         // Check if clicking on scrollbar (rightmost column inside border)
                         let scrollbar_col = rect.x + rect.width - 2; // -1 border, -1 scrollbar
                         if col >= scrollbar_col {
-                            let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), rect.height.saturating_sub(2));
+                            let inner = Rect::new(
+                                rect.x + 1,
+                                rect.y + 1,
+                                rect.width.saturating_sub(2),
+                                rect.height.saturating_sub(2),
+                            );
                             self.scroll_pane_to_click(pane_id, row, &inner);
                             self.dragging = Some(DragTarget::Scrollbar(pane_id, inner));
                         }
@@ -3370,10 +3611,12 @@ impl App {
                             // Pane: screen-relative coords inside inner.
                             sel.end_col = col
                                 .saturating_sub(inner.x)
-                                .min(inner.width.saturating_sub(1)) as u32;
+                                .min(inner.width.saturating_sub(1))
+                                as u32;
                             sel.end_row = row
                                 .saturating_sub(inner.y)
-                                .min(inner.height.saturating_sub(1)) as u32;
+                                .min(inner.height.saturating_sub(1))
+                                as u32;
                         }
                         SelectionTarget::Preview => {
                             // Preview: translate screen coords to
@@ -3409,9 +3652,9 @@ impl App {
                             let scroll_v = self.ws().preview.scroll_offset.max(scroll_v);
                             let h_scroll = self.ws().preview.h_scroll_offset.max(h_scroll);
                             // Clamp end_row to a valid absolute line index.
-                            let lines_len = self.ws().preview.lines.len();
-                            let abs_row = (scroll_v + screen_row as usize)
-                                .min(lines_len.saturating_sub(1));
+                            let lines_len = preview_line_count(&self.ws().preview);
+                            let abs_row =
+                                (scroll_v + screen_row as usize).min(lines_len.saturating_sub(1));
                             let abs_col = screen_col as usize + h_scroll;
                             // Update the selection endpoint (source coords).
                             if let Some(sel) = self.selection.as_mut() {
@@ -3425,11 +3668,14 @@ impl App {
                     let pane_rects = self.ws().last_pane_rects.clone();
                     let mut started = false;
                     for (pane_id, rect) in pane_rects {
-                        if col >= rect.x && col < rect.x + rect.width
-                            && row >= rect.y && row < rect.y + rect.height
+                        if col >= rect.x
+                            && col < rect.x + rect.width
+                            && row >= rect.y
+                            && row < rect.y + rect.height
                         {
                             let inner = Rect::new(
-                                rect.x + 1, rect.y + 1,
+                                rect.x + 1,
+                                rect.y + 1,
                                 rect.width.saturating_sub(2),
                                 rect.height.saturating_sub(2),
                             );
@@ -3454,13 +3700,20 @@ impl App {
                     // survive scrolling.
                     if !started {
                         if let Some(rect) = self.ws().last_preview_rect {
-                            if col >= rect.x && col < rect.x + rect.width
-                                && row >= rect.y && row < rect.y + rect.height
+                            if col >= rect.x
+                                && col < rect.x + rect.width
+                                && row >= rect.y
+                                && row < rect.y + rect.height
                             {
-                                const GUTTER: u16 = 5;
+                                let gutter_width = if self.ws().preview.diff_mode {
+                                    0
+                                } else {
+                                    5
+                                };
                                 let inner = Rect::new(
-                                    rect.x + 1 + GUTTER, rect.y + 1,
-                                    rect.width.saturating_sub(2 + GUTTER),
+                                    rect.x + 1 + gutter_width,
+                                    rect.y + 1,
+                                    rect.width.saturating_sub(2 + gutter_width),
                                     rect.height.saturating_sub(2),
                                 );
                                 // Ignore drags that start inside the gutter
@@ -3469,7 +3722,7 @@ impl App {
                                     let screen_row = row.saturating_sub(inner.y);
                                     let scroll_v = self.ws().preview.scroll_offset;
                                     let h_scroll = self.ws().preview.h_scroll_offset;
-                                    let lines_len = self.ws().preview.lines.len();
+                                    let lines_len = preview_line_count(&self.ws().preview);
                                     let abs_row = (scroll_v + screen_row as usize)
                                         .min(lines_len.saturating_sub(1));
                                     let abs_col = screen_col as usize + h_scroll;
@@ -3501,13 +3754,9 @@ impl App {
                                 .get(&pane_id)
                                 .map(|p| extract_selected_text(p, sr, sc, er, ec))
                                 .unwrap_or_default(),
-                            SelectionTarget::Preview => extract_preview_selected_text(
-                                &self.ws().preview,
-                                sr,
-                                sc,
-                                er,
-                                ec,
-                            ),
+                            SelectionTarget::Preview => {
+                                extract_preview_selected_text(&self.ws().preview, sr, sc, er, ec)
+                            }
                         };
                         if !text.is_empty() {
                             self.copy_to_clipboard(&text);
@@ -3521,16 +3770,20 @@ impl App {
                 let row = mouse.row;
 
                 if let Some(rect) = self.ws().last_file_tree_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().file_tree.scroll_up(3);
                         return;
                     }
                 }
                 if let Some(rect) = self.ws().last_preview_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().preview.scroll_up(3);
                         return;
@@ -3538,8 +3791,10 @@ impl App {
                 }
                 let pane_rects = self.ws().last_pane_rects.clone();
                 for (pane_id, rect) in pane_rects {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         if let Some(pane) = self.ws().panes.get(&pane_id) {
                             pane.scroll_up(3);
@@ -3553,16 +3808,20 @@ impl App {
                 let row = mouse.row;
 
                 if let Some(rect) = self.ws().last_file_tree_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().file_tree.scroll_down(3);
                         return;
                     }
                 }
                 if let Some(rect) = self.ws().last_preview_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().preview.scroll_down(3);
                         return;
@@ -3570,8 +3829,10 @@ impl App {
                 }
                 let pane_rects = self.ws().last_pane_rects.clone();
                 for (pane_id, rect) in pane_rects {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         if let Some(pane) = self.ws().panes.get(&pane_id) {
                             pane.scroll_down(3);
@@ -3584,8 +3845,10 @@ impl App {
                 let col = mouse.column;
                 let row = mouse.row;
                 if let Some(rect) = self.ws().last_preview_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().preview.scroll_left(4);
                     }
@@ -3595,8 +3858,10 @@ impl App {
                 let col = mouse.column;
                 let row = mouse.row;
                 if let Some(rect) = self.ws().last_preview_rect {
-                    if col >= rect.x && col < rect.x + rect.width
-                        && row >= rect.y && row < rect.y + rect.height
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
                     {
                         self.ws_mut().preview.scroll_right(4);
                     }
@@ -3619,7 +3884,6 @@ impl App {
             _ => {}
         }
     }
-
 
     /// Forward pasted text to PTY, wrapping in bracketed paste only if
     /// the PTY application has enabled the mode (e.g. Claude Code, modern
@@ -3660,10 +3924,10 @@ impl App {
             had_events = true;
             match event {
                 AppEvent::PtyEof(pane_id) => {
-                    let worktree_path = self.find_pane(pane_id)
+                    let worktree_path = self
+                        .find_pane(pane_id)
                         .and_then(|p| p.worktree_path.clone());
-                    let branch = self.find_pane(pane_id)
-                        .and_then(|p| p.branch_name.clone());
+                    let branch = self.find_pane(pane_id).and_then(|p| p.branch_name.clone());
 
                     for ws in &mut self.workspaces {
                         if let Some(pane) = ws.panes.get_mut(&pane_id) {
@@ -3683,9 +3947,13 @@ impl App {
                                     let merged = tokio::task::spawn_blocking(move || {
                                         crate::worktree::WorktreeManager::new()
                                             .check_merged(&wt, &main_branch)
-                                    }).await.unwrap_or(false);
+                                    })
+                                    .await
+                                    .unwrap_or(false);
                                     if merged {
-                                        let _ = tx.send(AppEvent::WorktreeMerged { worktree_path: wt_path });
+                                        let _ = tx.send(AppEvent::WorktreeMerged {
+                                            worktree_path: wt_path,
+                                        });
                                     }
                                 });
                             }
@@ -3719,6 +3987,7 @@ impl App {
                                 ws.name = dir_name(&ws.cwd);
                                 ws.git_status = None;
                                 ws.preview.close();
+                                ws.git_status = None;
                                 preview_closed_by_cwd = true;
                             }
                             break;
@@ -3728,6 +3997,7 @@ impl App {
                         self.preview_zoomed = false;
                         self.refresh_git_status_for_render(true);
                     }
+                    self.refresh_git_status_for_render(true);
                 }
                 AppEvent::PtyOutput { pane_id, lines } => {
                     if self.find_pane(pane_id).is_none() {
@@ -3767,21 +4037,37 @@ impl App {
                             if should_request {
                                 if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                     if !ring.is_empty() {
-                                        let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
+                                        let output =
+                                            ring.iter().cloned().collect::<Vec<_>>().join("\n");
                                         let tx = self.event_tx.clone();
                                         if let Some(handle) = &self.tokio_handle {
                                             self.ai_title_requested_once.insert(pane_id);
-                                            self.last_ai_title_request.insert(pane_id, Instant::now());
+                                            self.last_ai_title_request
+                                                .insert(pane_id, Instant::now());
                                             self.ai_title_in_flight.insert(pane_id);
                                             let config = self.config.ai_title_engine.clone();
-                                            let prompt_template = self.config.ai.title.prompt.clone();
+                                            let prompt_template =
+                                                self.config.ai.title.prompt.clone();
                                             let ollama_url = self.config.ai.ollama.base_url.clone();
                                             let ollama_model = self.config.ai.ollama.model.clone();
-                                            let gemini_api_key = self.config.ai.gemini.api_key.clone();
+                                            let gemini_api_key =
+                                                self.config.ai.gemini.api_key.clone();
                                             let gemini_model = self.config.ai.gemini.model.clone();
                                             handle.spawn(async move {
-                                                let title = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await;
-                                                let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
+                                                let title = ai_title::generate_title(
+                                                    &output,
+                                                    &config,
+                                                    &prompt_template,
+                                                    &ollama_url,
+                                                    &ollama_model,
+                                                    &gemini_api_key,
+                                                    &gemini_model,
+                                                )
+                                                .await;
+                                                let _ = tx.send(AppEvent::AiTitleGenerated {
+                                                    pane_id,
+                                                    title,
+                                                });
                                             });
                                         }
                                     }
@@ -3791,10 +4077,21 @@ impl App {
                     }
                     self.dirty = true;
                 }
-                AppEvent::HookReceived { pane_id, event } => {
-                    let pane_exists = self.workspaces.iter()
+                AppEvent::HookReceived {
+                    pane_id,
+                    event,
+                    context,
+                } => {
+                    let pane_exists = self
+                        .workspaces
+                        .iter()
                         .any(|ws| ws.panes.contains_key(&pane_id));
                     if pane_exists {
+                        self.claude_monitor.bind_session(
+                            pane_id,
+                            context.transcript_path.as_deref(),
+                            context.session_id.as_deref(),
+                        );
                         let state = self.pane_states.entry(pane_id).or_default();
                         match event {
                             HookEvent::Stop => {
@@ -3812,21 +4109,45 @@ impl App {
                                     if should_request {
                                         if let Some(ring) = self.pane_output_rings.get(&pane_id) {
                                             if !ring.is_empty() {
-                                                let output = ring.iter().cloned().collect::<Vec<_>>().join("\n");
+                                                let output = ring
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n");
                                                 let tx = self.event_tx.clone();
                                                 if let Some(handle) = &self.tokio_handle {
                                                     self.ai_title_requested_once.insert(pane_id);
-                                                    self.last_ai_title_request.insert(pane_id, Instant::now());
+                                                    self.last_ai_title_request
+                                                        .insert(pane_id, Instant::now());
                                                     self.ai_title_in_flight.insert(pane_id);
-                                                    let config = self.config.ai_title_engine.clone();
-                                                    let prompt_template = self.config.ai.title.prompt.clone();
-                                                    let ollama_url = self.config.ai.ollama.base_url.clone();
-                                                    let ollama_model = self.config.ai.ollama.model.clone();
-                                                    let gemini_api_key = self.config.ai.gemini.api_key.clone();
-                                                    let gemini_model = self.config.ai.gemini.model.clone();
+                                                    let config =
+                                                        self.config.ai_title_engine.clone();
+                                                    let prompt_template =
+                                                        self.config.ai.title.prompt.clone();
+                                                    let ollama_url =
+                                                        self.config.ai.ollama.base_url.clone();
+                                                    let ollama_model =
+                                                        self.config.ai.ollama.model.clone();
+                                                    let gemini_api_key =
+                                                        self.config.ai.gemini.api_key.clone();
+                                                    let gemini_model =
+                                                        self.config.ai.gemini.model.clone();
                                                     handle.spawn(async move {
-                                                        let title = ai_title::generate_title(&output, &config, &prompt_template, &ollama_url, &ollama_model, &gemini_api_key, &gemini_model).await;
-                                                        let _ = tx.send(AppEvent::AiTitleGenerated { pane_id, title });
+                                                        let title = ai_title::generate_title(
+                                                            &output,
+                                                            &config,
+                                                            &prompt_template,
+                                                            &ollama_url,
+                                                            &ollama_model,
+                                                            &gemini_api_key,
+                                                            &gemini_model,
+                                                        )
+                                                        .await;
+                                                        let _ =
+                                                            tx.send(AppEvent::AiTitleGenerated {
+                                                                pane_id,
+                                                                title,
+                                                            });
                                                     });
                                                 }
                                             }
@@ -3865,7 +4186,11 @@ impl App {
                             Some("AI generation failed or timed out".to_string());
                     }
                 }
-                AppEvent::WorktreeCreated { pane_id, cwd, branch_name: _ } => {
+                AppEvent::WorktreeCreated {
+                    pane_id,
+                    cwd,
+                    branch_name: _,
+                } => {
                     for ws in &mut self.workspaces {
                         if let Some(pane) = ws.panes.get_mut(&pane_id) {
                             pane.worktree_path = Some(cwd.clone());
@@ -3893,17 +4218,25 @@ impl App {
                         handle.spawn(async move {
                             if let Ok(worktrees) = tokio::task::spawn_blocking(move || {
                                 crate::worktree::WorktreeManager::new().list(&repo_root)
-                            }).await.unwrap_or(Err(anyhow::anyhow!("task failed"))) {
+                            })
+                            .await
+                            .unwrap_or(Err(anyhow::anyhow!("task failed")))
+                            {
                                 let _ = tx.send(AppEvent::WorktreesListed { worktrees });
                             }
                         });
                     }
                 }
-                AppEvent::WorktreeCreateFailed { pane_id: _, branch_name: _, error } => {
+                AppEvent::WorktreeCreateFailed {
+                    pane_id: _,
+                    branch_name: _,
+                    error,
+                } => {
                     eprintln!("glowmux: worktree create failed: {}", error);
                     // Surface error in the dialog if it's still open, otherwise show in status
                     if self.pane_create_dialog.visible {
-                        self.pane_create_dialog.error_msg = Some(format!("Worktree error: {}", error));
+                        self.pane_create_dialog.error_msg =
+                            Some(format!("Worktree error: {}", error));
                     }
                     self.dirty = true;
                 }
@@ -3918,12 +4251,15 @@ impl App {
                                 handle.spawn(async move {
                                     let _ = tokio::task::spawn_blocking(move || {
                                         crate::worktree::WorktreeManager::new().remove(&path, &root)
-                                    }).await;
+                                    })
+                                    .await;
                                 });
                             }
                         }
                         "ask" => {
-                            let branch = self.workspaces.iter()
+                            let branch = self
+                                .workspaces
+                                .iter()
                                 .flat_map(|ws| ws.panes.values())
                                 .find(|p| p.worktree_path.as_ref() == Some(&worktree_path))
                                 .and_then(|p| p.branch_name.clone())
@@ -3950,43 +4286,27 @@ impl App {
     }
 
     pub fn dismiss_done_on_focus(&mut self, pane_id: usize) {
-        if let Some(state) = self.pane_states.get_mut(&pane_id) {
-            if state.status == PaneStatus::Done {
-                state.dismissed = true;
-            }
+        if self.pane_status(pane_id) != PaneStatus::Done {
+            return;
+        }
+
+        let state = self.pane_states.entry(pane_id).or_default();
+        state.dismissed = true;
+        if state.status != PaneStatus::Done {
+            state.status = PaneStatus::Done;
         }
     }
 
     pub fn pane_status(&self, pane_id: usize) -> PaneStatus {
-        let hook_status = self.pane_states
+        let hook_status = self
+            .pane_states
             .get(&pane_id)
             .map(|s| s.status)
             .unwrap_or(PaneStatus::Idle);
 
         let claude_state = self.claude_monitor.state(pane_id);
 
-        // JSONL-derived activity always wins for Running — hooks are too coarse
-        // to capture the sub-turn tool execution cycle.
-        if claude_state.is_working {
-            return PaneStatus::Running;
-        }
-
-        // Hook says Waiting (Notification) → trust it; JSONL has no Waiting signal.
-        if hook_status == PaneStatus::Waiting {
-            return PaneStatus::Waiting;
-        }
-
-        // JSONL has token data → Claude ran at least once this session.
-        if claude_state.total_tokens() > 0 {
-            return PaneStatus::Done;
-        }
-
-        // Hook-driven Done/Running as final fallback.
-        if hook_status != PaneStatus::Idle {
-            return hook_status;
-        }
-
-        PaneStatus::Idle
+        resolve_pane_status(hook_status, &claude_state)
     }
 
     pub fn pane_state_dismissed(&self, pane_id: usize) -> bool {
@@ -3997,7 +4317,8 @@ impl App {
     }
 
     fn find_pane(&self, pane_id: usize) -> Option<&crate::pane::Pane> {
-        self.workspaces.iter()
+        self.workspaces
+            .iter()
             .flat_map(|ws| ws.panes.values())
             .find(|p| p.id == pane_id)
     }
@@ -4075,7 +4396,8 @@ fn restore_session_workspaces(
             let ws = &mut app.workspaces[ws_idx];
             let focused = ws.focused_pane_id;
             ws.panes.insert(new_pane_id, pane);
-            ws.layout.split_pane(focused, new_pane_id, SplitDirection::Vertical);
+            ws.layout
+                .split_pane(focused, new_pane_id, SplitDirection::Vertical);
             if !pane_snap.title.is_empty() {
                 app.ai_title_requested_once.insert(new_pane_id);
                 app.ai_titles.insert(new_pane_id, pane_snap.title.clone());
@@ -4126,8 +4448,18 @@ fn extract_selected_text(pane: &Pane, sr: u32, sc: u32, er: u32, ec: u32) -> Str
 /// `sr`/`er` are absolute line indices; `sc`/`ec` are char offsets
 /// within the line (selection is stored in source coordinates so it
 /// survives scrolling). Trailing empty lines are stripped.
-fn extract_preview_selected_text(preview: &crate::preview::Preview, sr: u32, sc: u32, er: u32, ec: u32) -> String {
-    let lines = &preview.lines;
+fn extract_preview_selected_text(
+    preview: &crate::preview::Preview,
+    sr: u32,
+    sc: u32,
+    er: u32,
+    ec: u32,
+) -> String {
+    let lines: Vec<&str> = if preview.diff_mode && !preview.diff_lines.is_empty() {
+        preview.diff_lines.iter().map(|line| line.text.as_str()).collect()
+    } else {
+        preview.lines.iter().map(|line| line.as_str()).collect()
+    };
     let mut out: Vec<String> = Vec::new();
 
     for abs_row in sr..=er {
@@ -4135,11 +4467,13 @@ fn extract_preview_selected_text(preview: &crate::preview::Preview, sr: u32, sc:
         if idx >= lines.len() {
             break;
         }
-        let line = &lines[idx];
+        let line = lines[idx];
         let chars: Vec<char> = line.chars().collect();
 
         let col_start = if abs_row == sr { sc as usize } else { 0 };
-        let col_end_inclusive = if abs_row == er { ec as usize } else {
+        let col_end_inclusive = if abs_row == er {
+            ec as usize
+        } else {
             chars.len().saturating_sub(1)
         };
 
@@ -4174,7 +4508,9 @@ fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
     match key.code {
         KeyCode::Char(c) => {
             if ctrl {
-                let ctrl_byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+                let ctrl_byte = (c.to_ascii_lowercase() as u8)
+                    .wrapping_sub(b'a')
+                    .wrapping_add(1);
                 if ctrl_byte <= 26 {
                     if alt {
                         // Alt+Ctrl+Char → ESC + ctrl byte
@@ -4213,9 +4549,18 @@ fn key_event_to_bytes(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Insert => Some(b"\x1b[2~".to_vec()),
         KeyCode::F(n) => {
             let seq = match n {
-                1 => "\x1bOP", 2 => "\x1bOQ", 3 => "\x1bOR", 4 => "\x1bOS",
-                5 => "\x1b[15~", 6 => "\x1b[17~", 7 => "\x1b[18~", 8 => "\x1b[19~",
-                9 => "\x1b[20~", 10 => "\x1b[21~", 11 => "\x1b[23~", 12 => "\x1b[24~",
+                1 => "\x1bOP",
+                2 => "\x1bOQ",
+                3 => "\x1bOR",
+                4 => "\x1bOS",
+                5 => "\x1b[15~",
+                6 => "\x1b[17~",
+                7 => "\x1b[18~",
+                8 => "\x1b[19~",
+                9 => "\x1b[20~",
+                10 => "\x1b[21~",
+                11 => "\x1b[23~",
+                12 => "\x1b[24~",
                 _ => return None,
             };
             Some(seq.as_bytes().to_vec())
@@ -4251,6 +4596,76 @@ mod tests {
 
         assert!(!should_request_ai_title(false, false, Some(recent), 30));
         assert!(should_request_ai_title(false, false, Some(old), 30));
+    }
+
+    #[test]
+    fn test_resolve_pane_status_prefers_jsonl_running() {
+        let state = crate::claude_monitor::ClaudeState {
+            is_working: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_pane_status(PaneStatus::Waiting, &state),
+            PaneStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_resolve_pane_status_prefers_hook_waiting_over_done_tokens() {
+        let state = crate::claude_monitor::ClaudeState {
+            output_tokens: 42,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_pane_status(PaneStatus::Waiting, &state),
+            PaneStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn test_resolve_pane_status_prefers_hook_running_over_done_tokens() {
+        let state = crate::claude_monitor::ClaudeState {
+            output_tokens: 42,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_pane_status(PaneStatus::Running, &state),
+            PaneStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_resolve_pane_status_falls_back_to_done_from_tokens() {
+        let state = crate::claude_monitor::ClaudeState {
+            output_tokens: 42,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_pane_status(PaneStatus::Idle, &state),
+            PaneStatus::Done
+        );
+    }
+
+    #[test]
+    fn test_dismiss_done_on_focus_marks_derived_done_as_dismissed() {
+        let mut app = App::new(20, 80, ConfigFile::default()).unwrap();
+        let pane_id = app.ws().focused_pane_id;
+
+        let state = crate::claude_monitor::ClaudeState {
+            output_tokens: 42,
+            ..Default::default()
+        };
+        app.claude_monitor.set_state_for_test(pane_id, state);
+
+        assert_eq!(app.pane_status(pane_id), PaneStatus::Done);
+        app.dismiss_done_on_focus(pane_id);
+
+        assert!(app.pane_state_dismissed(pane_id));
+        assert_eq!(app.pane_states.get(&pane_id).map(|s| s.status), Some(PaneStatus::Done));
     }
 
     #[test]
@@ -4350,5 +4765,19 @@ mod tests {
         assert_eq!(app.ws().file_tree.root_path, root);
         assert_eq!(app.ws().file_tree.selected_index, 2);
         assert_eq!(app.ws().file_tree.scroll_offset, 1);
+    }
+
+    #[test]
+    fn test_extract_preview_selected_text_uses_diff_lines_in_diff_mode() {
+        let mut preview = crate::preview::Preview::new();
+        preview.lines = vec!["plain".to_string()];
+        preview.diff_mode = true;
+        preview.diff_lines = vec![crate::preview::DiffLine {
+            text: "+delta".to_string(),
+            kind: crate::preview::DiffLineKind::Added,
+            styled_spans: Vec::new(),
+        }];
+
+        assert_eq!(extract_preview_selected_text(&preview, 0, 0, 0, 5), "+delta");
     }
 }

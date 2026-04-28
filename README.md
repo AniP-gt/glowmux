@@ -49,6 +49,101 @@ cp setting.sample.toml ~/.config/glowmux/config.toml
 
 Session data is stored separately at `<config-dir>/glowmux/session.json`.
 
+## Claude Code hooks
+
+glowmux can listen for Claude Code hook events on a local Unix socket and use them to color each pane independently.
+
+The repo includes a small forwarder at `scripts/claude-hooks/glowmux-forwarder.py`.
+It reads the Claude hook payload from stdin, adds `pane_id` from `GLOWMUX_PANE_ID`, then forwards the JSON to glowmux's socket.
+
+The script is safe to leave installed even when glowmux is not running.
+If there is no `GLOWMUX_PANE_ID`, no socket, or no valid JSON on stdin, it exits quietly.
+
+### 1. Pick an absolute path to the forwarder
+
+Use an absolute path in Claude Code config.
+On macOS and Linux, this is usually easiest with `python3`:
+
+```bash
+python3 /absolute/path/to/glowmux/scripts/claude-hooks/glowmux-forwarder.py
+```
+
+If your path contains spaces, keep the full command as one valid JSON string in Claude Code config.
+
+### 2. Register the hook in Claude Code
+
+Add this to your Claude Code `settings.json` hooks section:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/glowmux/scripts/claude-hooks/glowmux-forwarder.py"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/glowmux/scripts/claude-hooks/glowmux-forwarder.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/glowmux/scripts/claude-hooks/glowmux-forwarder.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/glowmux/scripts/claude-hooks/glowmux-forwarder.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Claude Code passes the hook payload as JSON on stdin.
+glowmux accepts either `event` or `hook_event_name`, along with `session_id` and `transcript_path` when Claude provides them.
+
+The `Notification` hook uses `matcher: "permission_prompt"` rather than an empty matcher.
+Using an empty matcher would fire on every internal notification Claude Code emits (tool results, sub-agent calls, etc.), causing constant `Waiting` state flicker in glowmux.
+Restricting to `permission_prompt` ensures glowmux only enters the yellow waiting state when Claude is actually blocked on user approval.
+
+### 3. Start Claude inside a glowmux pane
+
+glowmux injects `GLOWMUX_PANE_ID` into each pane process.
+As long as Claude starts inside that pane, the forwarder can attach the hook event to the correct pane.
+
+### 4. Socket path
+
+The forwarder sends to the same runtime socket that glowmux opens:
+
+- Linux: `$XDG_CONFIG_HOME/glowmux/hooks.sock`, or `~/.config/glowmux/hooks.sock` when `XDG_CONFIG_HOME` is not set
+- macOS: `~/Library/Application Support/glowmux/hooks.sock`
+
+Windows is not covered by this helper yet because the current runtime uses a Unix socket.
+
 ### Important config notes
 
 - `ai.gemini.api_key` is read when glowmux loads the config, but app saves never write it back
@@ -187,6 +282,7 @@ Preview behavior comes from `src/preview.rs`.
 - Binary files are detected from the first 8192 bytes and are not rendered as text
 - Image preview is attempted for common image extensions such as `png`, `jpg`, `gif`, `webp`, `bmp`, `ico`, and `tiff`
 - Diff preview runs pane-scoped `git diff HEAD -- <file>` for the selected file and shows the first 500 diff lines
+- If `[preview].prefer_delta = true` and `delta` is installed, glowmux prefers delta-styled diff output for the embedded preview and falls back to plain git diff automatically when delta is unavailable or unsuitable
 - If there is no diff, diff preview stays off and the app shows a status message
 
 ## In-app settings and feature toggles
