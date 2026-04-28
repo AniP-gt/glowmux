@@ -1,146 +1,263 @@
 # glowmux
 
-Claude Code Multiplexer — manage multiple Claude Code instances in TUI split panes.
-
-A lightweight terminal multiplexer built specifically for running multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions side-by-side.
+Manage multiple Claude Code or shell sessions in one Rust TUI.
 
 ![glowmux screenshot](screenshot.png)
 
-## Features
+## What it does
 
-- **Multi-pane terminal** — Split vertically/horizontally, run independent PTY shells
-- **Tab workspaces** — Multiple project tabs with click-to-switch
-- **File tree sidebar** — Browse project files with icons, expand/collapse directories
-- **Syntax-highlighted preview** — View file contents with language-aware coloring
-- **Claude Code detection** — Pane border turns orange when Claude Code is running
-- **cd tracking** — File tree and tab name auto-update when you change directories
-- **Mouse support** — Click to focus, drag borders to resize, scroll history
-- **Scrollback** — 10,000 lines of terminal history per pane
-- **Dark theme** — Claude-inspired color scheme
-- **Cross-platform** — Windows, macOS, Linux
-- **Single binary** — ~1MB, no runtime dependencies
+- Split one terminal into multiple PTY panes
+- Keep separate tab workspaces
+- Show a file tree for the active workspace directory
+- Preview text files, images, and git diffs
+- Track pane working directories through OSC 7 updates
+- Can save and restore session snapshots in the config directory when session support is enabled
 
-## Install
-
-### Via npm (recommended)
+## Build and run
 
 ```bash
-npm install -g glowmux-cli
-```
-
-### Download binary
-
-Download the latest binary from [Releases](https://github.com/AniP-gt/glowmux/releases):
-
-| Platform | File |
-|----------|------|
-| Windows (x64) | `glowmux-windows-x64.exe` |
-| macOS (Apple Silicon) | `glowmux-macos-arm64` |
-| macOS (Intel) | `glowmux-macos-x64` |
-| Linux (x64) | `glowmux-linux-x64` |
-
-> **Windows:** Microsoft Defender SmartScreen may show a warning because the binary is not code-signed. Click "More info" → "Run anyway" to proceed. This is normal for unsigned open-source software.
-
-> **macOS/Linux:** After downloading, make the binary executable: `chmod +x glowmux-*`
-
-### From source
-
-```bash
-git clone https://github.com/AniP-gt/glowmux.git
-cd glowmux
 cargo build --release
-# Binary at target/release/glowmux (or glowmux.exe on Windows)
+cargo run
 ```
 
-Requires [Rust](https://rustup.rs/) toolchain.
-
-## Usage
+You can also start in a specific directory:
 
 ```bash
-glowmux
+glowmux /path/to/project
 ```
 
-Launch from any directory. The file tree shows the current working directory.
+Nested glowmux sessions are blocked. If `GLOWMUX` is already set, the app exits instead of starting inside an existing pane.
+
+## Configuration
+
+glowmux loads its runtime config from `dirs::config_dir()/glowmux/config.toml`.
+On common setups that usually resolves to:
+
+- Linux: `~/.config/glowmux/config.toml`
+- macOS: `~/Library/Application Support/glowmux/config.toml`
+- Windows: `%AppData%\glowmux\config.toml`
+
+Keys you omit fall back to the built-in defaults from `src/config.rs`.
+
+This repo also includes `setting.sample.toml`. Keep that filename in the repo, then copy it to your runtime path as `config.toml`.
+
+```bash
+# Linux example
+mkdir -p ~/.config/glowmux
+cp setting.sample.toml ~/.config/glowmux/config.toml
+```
+
+Session data is stored separately at `<config-dir>/glowmux/session.json`.
+
+### Important config notes
+
+- `ai.gemini.api_key` is read when glowmux loads the config, but app saves never write it back
+- `session.save_path` exists in the config schema, but the current runtime still saves and loads `<config-dir>/glowmux/session.json`
+- Session restore runs before startup panes. If restore succeeds, startup panes are skipped
+- Session saving currently happens on clean exit when `session.enabled = true`
+- `session.auto_save`, `session.save_interval`, and `session.restore_claude` exist in the schema, but they are not currently wired into runtime behavior
+- The app can run with no config file at all. `config.toml` is only created when glowmux saves settings for you
+- See `setting.sample.toml` for the full commented template and defaults
 
 ## Keybindings
 
-### Pane mode (default)
+Configurable defaults come from `KeybindingsConfig::default()` in `src/config.rs`. A few context-specific bindings such as `Alt+S`, `Alt+1..9`, and `Ctrl+Left` / `Ctrl+Right` are handled directly in the app.
+
+### Pane focus keys
+
+These defaults work while pane focus is active.
 
 | Key | Action |
-|-----|--------|
+|---|---|
 | `Ctrl+D` | Split vertically |
 | `Ctrl+E` | Split horizontally |
-| `Ctrl+W` | Close pane / tab |
-| `Alt+T` / `Ctrl+T` | New tab |
-| `Alt+1..9` | Jump to tab N |
-| `Alt+Left/Right` | Previous / next tab |
-| `Alt+R` | Rename tab (session only) |
-| `Alt+S` | Toggle status bar |
-| `Ctrl+F` | Toggle file tree |
-| `Ctrl+P` | Swap preview/terminal layout |
-| `Ctrl+Right/Left` | Cycle focus (sidebar, preview, panes) |
+| `Ctrl+W` | Close focused preview, pane, or tab |
+| `Ctrl+N` | Open the pane creation dialog |
+| `Ctrl+T` | New tab |
+| `Alt+Left` / `Alt+Right` | Previous / next tab |
+| `Alt+1`..`Alt+9` | Jump to tab |
+| `Alt+R` | Rename current tab |
+| `Alt+H` / `Alt+J` / `Alt+K` / `Alt+L` | Move focus between panes by direction |
+| `Alt+[` / `Alt+]` | Previous / next pane |
+| `Ctrl+Left` / `Ctrl+Right` | Cycle focus across file tree, preview, and panes |
+| `Ctrl+F` | Toggle file tree or move focus to it |
+| `Ctrl+P` | Swap preview and pane columns |
+| `Ctrl+L` | Open layout picker when more than one pane exists |
+| `Alt+Z` | Zoom the focused pane, or the preview when preview has focus |
+| `Ctrl+Y` | Copy visible content from the focused pane |
+| `Alt+A` | Toggle AI title generation |
+| `Ctrl+,` | Open the numeric settings panel |
+| `?` | Open the feature toggle panel, pane focus only |
+| `Alt+S` | Toggle the status bar for the current run |
 | `Ctrl+Q` | Quit |
 
-### File tree mode (after `Ctrl+F`)
+### Prefix key
+
+The default prefix is `Ctrl+B`.
+
+After pressing the prefix:
 
 | Key | Action |
-|-----|--------|
-| `j` / `k` | Move selection |
-| `Enter` | Open file / expand directory |
+|---|---|
+| `q` | Quit |
+| `Space` | Cycle layout mode |
+| `[` | Enter copy mode |
+| `w` | Open the pane list overlay |
+| `Ctrl+B` again | Pass the prefix key through to the PTY |
+
+Copy mode is pane-only. It uses vim-like movement keys such as `h`, `j`, `k`, `l`, `g`, `G`, `v`, `V`, `Ctrl+U`, `Ctrl+D`, then `y` or `Enter` to copy.
+
+### File tree keys
+
+The file tree is context-specific. These keys work when file tree focus is active.
+
+| Key | Action |
+|---|---|
+| `j` / `k` or arrows | Move selection |
+| `Ctrl+D` / `Ctrl+U` | Scroll 5 lines |
+| `Enter` or `o` | Expand or collapse a directory, or act on a file |
 | `.` | Toggle hidden files |
-| `Esc` | Return to pane |
+| `d` | Load the selected file and show its git diff, only when `features.diff_preview = true` |
+| `Esc` | Return focus to panes, keep preview open |
+| `Ctrl+F` | Close the file tree when it has focus |
 
-### Preview mode (after focusing preview)
+Important file tree behavior:
+
+- Hidden files are shown by default
+- `.git` is always hidden
+- Directories expand and collapse lazily
+- The file tree follows the focused pane. If panes point at different subdirectories, repositories, or worktrees, the file tree and git badges rebind to that pane context.
+- Git badges are pane-scoped and use compact markers: `M` modified, `+` added, `-` deleted, `→` renamed, `?` untracked, `◌` ignored, `!` conflicted.
+- `filetree.enter_action` decides what `Enter` does for files:
+  - `preview`: open preview and move focus to the preview
+  - `editor` or `neovim`: send the editor command to the focused pane shell
+  - `choose`: open a small action picker with preview or editor
+- `filetree.editor` is the command name used by editor mode. The default is `nvim`
+
+### Preview keys
+
+These keys work when preview focus is active.
 
 | Key | Action |
-|-----|--------|
-| `j` / `k` | Scroll vertically |
-| `h` / `l` | Scroll horizontally |
+|---|---|
+| `j` / `k` or arrows | Scroll vertically |
+| `Ctrl+D` / `Ctrl+U` | Scroll 5 lines |
+| `PageDown` / `PageUp` | Scroll by 20 lines |
+| `h` / `l` or Left / Right | Scroll horizontally |
+| `Home` | Reset horizontal scroll |
+| `y` | Copy filename |
+| `Y` | Copy full path |
+| `Alt+Z` | Toggle preview zoom |
 | `Ctrl+W` | Close preview |
-| `Esc` | Return to pane |
+| `Ctrl+P` | Swap preview and pane columns |
+| `Ctrl+Left` / `Ctrl+Right` | Cycle focus back through panes and the file tree |
+| `Ctrl+Q` | Quit |
+| `Esc` | Return to file tree if visible, otherwise return to panes |
 
 ### Mouse
 
-| Action | Effect |
-|--------|--------|
-| Click pane | Focus pane |
-| Click tab | Switch tab |
-| Double-click tab | Rename tab |
-| Click `+` | New tab |
-| Drag border | Resize panels |
-| Scroll wheel | Scroll file tree / preview / terminal history |
+- Click a pane to focus it
+- Click a tab to switch tabs
+- Double-click a tab to start rename
+- Click `+` in the tab bar to open a new tab
+- Drag borders to resize the file tree, preview, or pane splits
+- Scroll inside the file tree, preview, or pane history
+- Drag across pane or preview text to select it. Releasing the mouse copies the selection to the clipboard
 
-## Architecture
+## Runtime behavior that matters
 
-```
+- The active workspace starts from your current directory, or from the directory passed on the command line
+- For bash and zsh, glowmux injects OSC 7 directory updates so `cd` changes can update the workspace state automatically
+- When the focused pane changes directory through OSC 7, glowmux updates the workspace cwd, rebuilds the file tree, updates the cwd-based tab name, and closes the preview
+- Manual tab rename is session-only. It changes the displayed label for that run, but it is not persisted
+- Session restore takes priority over startup panes
+- Current session restore is limited. It recreates tabs, pane counts, and saved titles, but it does not fully restore pane cwd, saved layout mode, worktree metadata, or Claude relaunch state
+- The file tree auto-refreshes while visible, so directory changes show up without reopening the app
+- `Ctrl+C` copies the current text selection if one exists. Otherwise it is forwarded to the focused PTY as usual
+- Closing a preview does not close the file tree
+- Closing the file tree while it has focus moves focus to the preview if one is open, otherwise back to panes
+
+## Preview limits and diff behavior
+
+Preview behavior comes from `src/preview.rs`.
+
+- Text preview reads up to 500 lines
+- Text files larger than 10 MB are rejected
+- Image files larger than 20 MB are rejected
+- Binary files are detected from the first 8192 bytes and are not rendered as text
+- Image preview is attempted for common image extensions such as `png`, `jpg`, `gif`, `webp`, `bmp`, `ico`, and `tiff`
+- Diff preview runs pane-scoped `git diff HEAD -- <file>` for the selected file and shows the first 500 diff lines
+- If there is no diff, diff preview stays off and the app shows a status message
+
+## In-app settings and feature toggles
+
+`Ctrl+,` opens the settings panel. Today it edits only these numeric values:
+
+- `terminal.scrollback`
+- `layout.breakpoint_stack`
+- `layout.breakpoint_split2`
+- `ai_title_engine.update_interval_sec`
+- `ai_title_engine.max_chars`
+
+`?` opens the feature toggle panel, but only while pane focus is active. It edits and saves this exact list of booleans:
+
+- `status_dot`
+- `status_bg_color`
+- `status_bar`
+- `worktree`
+- `worktree_ai_name`
+- `file_tree`
+- `file_preview`
+- `diff_preview`
+- `cd_tracking`
+- `ai_title`
+- `responsive_layout`
+- `session_persist`
+- `context_copy`
+- `layout_picker`
+- `startup_panes`
+- `zoom`
+
+Those dialogs save back to `config.toml`. Some of the saved booleans are active runtime toggles, while others are currently schema fields that are not enforced everywhere yet.
+Hotkeys like `Alt+A` change runtime state immediately, but they do not write the config file by themselves.
+
+## Configuration sections
+
+The config file supports these top-level sections:
+
+- `[features]`
+- `[terminal]`
+- `[layout]`
+- `[startup]`
+- `[[startup.panes]]`
+- `[pane]`
+- `[ai]`
+- `[ai.title]`
+- `[ai.worktree_name]`
+- `[ai.ollama]`
+- `[ai.gemini]`
+- `[ai.claude_headless]`
+- `[status]`
+- `[worktree]`
+- `[session]`
+- `[keybindings]`
+- `[ai_title_engine]`
+- `[filetree]`
+
+Use `setting.sample.toml` as the schema reference. It mirrors the current config schema from `src/config.rs` and includes the shipped defaults, including a few fields that are not fully wired into runtime behavior yet.
+
+## Source map
+
+```text
 src/
-├── main.rs       # Entry point, event loop, panic hook
-├── app.rs        # Workspace/tab state, layout tree, key/mouse handling
-├── pane.rs       # PTY management, vt100 emulation, shell detection
-├── ui.rs         # ratatui rendering, theme, layout
-├── filetree.rs   # File tree scanning, navigation
-└── preview.rs    # File preview with syntax highlighting
+├── main.rs
+├── app.rs
+├── config.rs
+├── filetree.rs
+├── pane.rs
+├── preview.rs
+└── session.rs
 ```
-
-**Key design decisions:**
-- `vt100` crate for terminal emulation (not ANSI stripping) — needed for Claude Code's interactive UI
-- Binary tree layout for recursive pane splitting with variable ratios
-- Per-PTY reader threads with mpsc channel to main event loop
-- OSC 7 detection for automatic cd tracking
-- Dirty-flag rendering for minimal CPU usage when idle
-
-## Tech Stack
-
-- [ratatui](https://ratatui.rs/) + [crossterm](https://github.com/crossterm-rs/crossterm) — TUI framework
-- [portable-pty](https://github.com/nickelc/portable-pty) — PTY abstraction (ConPTY on Windows)
-- [vt100](https://crates.io/crates/vt100) — Terminal emulation
-- [syntect](https://github.com/trishume/syntect) — Syntax highlighting
-
-## Learn Claude Code
-
-New to Claude Code? Check out [Claude Code Academy](https://claude-code-academy.dev) for tutorials and guides.
-
-> Inspired by [ccmux](https://github.com/Shin-sibainu/ccmux).
 
 ## License
 
