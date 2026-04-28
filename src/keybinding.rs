@@ -32,6 +32,16 @@ pub fn parse_keybinding(s: &str) -> Option<(KeyModifiers, KeyCode)> {
             "up" => return Some((KeyModifiers::ALT, KeyCode::Up)),
             "down" => return Some((KeyModifiers::ALT, KeyCode::Down)),
             _ => {
+                if let Some(tail) = rest.strip_prefix("shift+") {
+                    let c = tail.chars().next()?;
+                    if tail.chars().count() == 1 {
+                        return Some((
+                            KeyModifiers::ALT | KeyModifiers::SHIFT,
+                            KeyCode::Char(c.to_ascii_uppercase()),
+                        ));
+                    }
+                    return None;
+                }
                 let c = rest.chars().next()?;
                 if rest.chars().count() == 1 {
                     return Some((KeyModifiers::ALT, KeyCode::Char(c)));
@@ -65,6 +75,9 @@ pub fn keybinding_display(s: &str) -> String {
         return format!("^{}", rest.to_uppercase());
     }
     if let Some(rest) = lower.strip_prefix("alt+") {
+        if let Some(tail) = rest.strip_prefix("shift+") {
+            return format!("A-S-{}", tail.to_uppercase());
+        }
         let sym = match rest {
             "left" => "←".to_string(),
             "right" => "→".to_string(),
@@ -92,6 +105,7 @@ pub fn validate_keybindings(kb: &KeybindingsConfig) -> Vec<String> {
         ("pane_down", &kb.pane_down),
         ("quit", &kb.quit),
         ("tab_rename", &kb.tab_rename),
+        ("pane_rename", &kb.pane_rename),
         ("tab_new", &kb.tab_new),
         ("tab_next", &kb.tab_next),
         ("tab_prev", &kb.tab_prev),
@@ -107,6 +121,7 @@ pub fn validate_keybindings(kb: &KeybindingsConfig) -> Vec<String> {
         ("feature_toggle", &kb.feature_toggle),
         ("pane_next", &kb.pane_next),
         ("pane_prev", &kb.pane_prev),
+        ("pane_list", &kb.pane_list),
     ];
 
     let mut seen: HashMap<(KeyModifiers, KeyCode), Vec<&str>> = HashMap::new();
@@ -189,6 +204,22 @@ mod tests {
     #[test]
     fn test_parse_invalid() {
         assert_eq!(parse_keybinding("invalid"), None);
+    }
+
+    #[test]
+    fn test_parse_alt_shift_r() {
+        assert_eq!(
+            parse_keybinding("alt+shift+r"),
+            Some((
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+                KeyCode::Char('R')
+            ))
+        );
+    }
+
+    #[test]
+    fn test_display_alt_shift_r() {
+        assert_eq!(keybinding_display("alt+shift+r"), "A-S-R");
     }
 
     #[test]
