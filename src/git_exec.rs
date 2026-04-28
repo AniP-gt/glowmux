@@ -71,7 +71,26 @@ fn fallback_candidates() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_git_bin_override<T>(value: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os("GLOWMUX_GIT_BIN");
+        std::env::set_var("GLOWMUX_GIT_BIN", value);
+        let result = f();
+        if let Some(previous) = previous {
+            std::env::set_var("GLOWMUX_GIT_BIN", previous);
+        } else {
+            std::env::remove_var("GLOWMUX_GIT_BIN");
+        }
+        result
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -98,16 +117,16 @@ mod tests {
 
     #[test]
     fn git_binary_allows_override() {
-        std::env::set_var("GLOWMUX_GIT_BIN", "/opt/homebrew/bin/git");
-        assert_eq!(git_binary(), OsString::from("/opt/homebrew/bin/git"));
-        std::env::remove_var("GLOWMUX_GIT_BIN");
+        with_git_bin_override("/opt/homebrew/bin/git", || {
+            assert_eq!(git_binary(), OsString::from("/opt/homebrew/bin/git"));
+        });
     }
 
     #[test]
     fn git_command_uses_configured_binary() {
-        std::env::set_var("GLOWMUX_GIT_BIN", "/tmp/custom-git");
-        let cmd = git_command();
-        assert_eq!(cmd.get_program(), PathBuf::from("/tmp/custom-git"));
-        std::env::remove_var("GLOWMUX_GIT_BIN");
+        with_git_bin_override("/tmp/custom-git", || {
+            let cmd = git_command();
+            assert_eq!(cmd.get_program(), PathBuf::from("/tmp/custom-git"));
+        });
     }
 }
