@@ -1629,6 +1629,8 @@ fn render_feature_toggle(app: &App, frame: &mut Frame, area: Rect) {
         (kb.clipboard_copy.as_str(), "clipboard copy"),
         (kb.ai_title_toggle.as_str(), "ai title toggle"),
         (kb.quit.as_str(), "quit"),
+        ("alt+s", "status bar toggle"),
+        ("alt+1-9", "jump to tab N"),
     ];
 
     // Sized to fit features + divider + cheatsheet + 3 lines of chrome (title,

@@ -622,8 +622,8 @@ impl Default for KeybindingsConfig {
             clipboard_copy: "ctrl+y".to_string(),
             ai_title_toggle: "alt+a".to_string(),
             feature_toggle: "?".to_string(),
-            pane_next: "".to_string(),
-            pane_prev: "".to_string(),
+            pane_next: "alt+n".to_string(),
+            pane_prev: "alt+b".to_string(),
             pane_list: "alt+p".to_string(),
         }
     }
