@@ -3,6 +3,7 @@ name = "glowmux"
 version = "0.1.0"
 edition = "2021"
 description = "Glow Multiplexer — manage multiple Claude Code instances in TUI panes"
+default-run = "gmux"
 
 [[bin]]
 name = "glowmux"
