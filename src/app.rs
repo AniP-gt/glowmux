@@ -625,7 +625,7 @@ impl Workspace {
             panes,
             layout: LayoutNode::Leaf { pane_id },
             focused_pane_id: pane_id,
-            sidebar_mode: SidebarMode::FileTree,
+            sidebar_mode: SidebarMode::None,
             preview: Preview::new(),
             git_status: None,
             focus_target: FocusTarget::Pane,
@@ -2951,19 +2951,39 @@ impl App {
 
     fn apply_startup_panes(&mut self, rows: u16, cols: u16) -> Result<()> {
         let pane_configs = self.config.startup.panes.clone();
+        if pane_configs.is_empty() {
+            return Ok(());
+        }
 
-        for (i, startup_pane) in pane_configs.iter().enumerate().skip(1) {
+        let initial_id = self.ws().focused_pane_id;
+        let mut all_ids = vec![initial_id];
+        let mut commands: Vec<(usize, String)> = Vec::new();
+
+        if let Some(first) = pane_configs.first() {
+            if !first.command.is_empty() {
+                commands.push((initial_id, first.command.clone()));
+            }
+        }
+
+        for startup_pane in pane_configs.iter().skip(1) {
             let new_id = self.next_pane_id;
             self.next_pane_id = self.next_pane_id.wrapping_add(1);
 
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let pane = Pane::new_with_cwd(new_id, rows, cols, self.event_tx.clone(), Some(cwd))?;
+            self.ws_mut().panes.insert(new_id, pane);
+            all_ids.push(new_id);
 
-            let focused = self.ws().focused_pane_id;
-            let ws = self.ws_mut();
-            ws.panes.insert(new_id, pane);
+            if !startup_pane.command.is_empty() {
+                commands.push((new_id, startup_pane.command.clone()));
+            }
+        }
 
-            let direction = match startup_pane.split.to_lowercase().as_str() {
+        let directions: Vec<SplitDirection> = pane_configs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, sp)| match sp.split.to_lowercase().as_str() {
                 "vertical" | "v" => SplitDirection::Vertical,
                 "horizontal" | "h" => SplitDirection::Horizontal,
                 _ => {
@@ -2973,27 +2993,39 @@ impl App {
                         SplitDirection::Horizontal
                     }
                 }
-            };
-            ws.layout.split_pane(focused, new_id, direction);
-            ws.focused_pane_id = new_id;
+            })
+            .collect();
 
-            if !startup_pane.command.is_empty() {
-                let cmd = format!("{}\r", startup_pane.command);
-                if let Some(p) = ws.panes.get_mut(&new_id) {
-                    let _ = p.write_input(cmd.as_bytes());
-                }
+        let uniform_dir = if directions.is_empty() {
+            None
+        } else if directions.iter().all(|&d| d == directions[0]) {
+            Some(directions[0])
+        } else {
+            None
+        };
+
+        if let Some(dir) = uniform_dir {
+            // All panes share one direction: build a balanced binary tree so every
+            // pane gets an equal share. Sequential splitting produces a skewed tree
+            // where each new split halves only the last pane.
+            if let Some(new_layout) = Self::build_stack(&all_ids, dir) {
+                self.ws_mut().layout = new_layout;
+            }
+        } else {
+            // Mixed directions: build tree sequentially, splitting the previously
+            // added pane each time (replicates the original incremental behavior).
+            for (i, _) in pane_configs.iter().enumerate().skip(1) {
+                let new_id = all_ids[i];
+                let focused = all_ids[i - 1];
+                let direction = directions[i - 1];
+                self.ws_mut().layout.split_pane(focused, new_id, direction);
             }
         }
 
-        if let Some(first) = pane_configs.first() {
-            if !first.command.is_empty() {
-                let Some(&first_id) = self.workspaces[0].layout.collect_pane_ids().first() else {
-                    return Ok(());
-                };
-                let cmd = format!("{}\r", first.command);
-                if let Some(p) = self.ws_mut().panes.get_mut(&first_id) {
-                    let _ = p.write_input(cmd.as_bytes());
-                }
+        for (pane_id, cmd) in commands {
+            let cmd = format!("{}\r", cmd);
+            if let Some(p) = self.ws_mut().panes.get_mut(&pane_id) {
+                let _ = p.write_input(cmd.as_bytes());
             }
         }
 
