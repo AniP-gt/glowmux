@@ -49,6 +49,25 @@ default_agent = ""
 command = ""
 worktree = false
 branch = ""
+split = "vertical"
+
+[[startup.panes]]
+command = ""
+worktree = false
+branch = ""
+split = "vertical"
+
+[[startup.panes]]
+command = ""
+worktree = false
+branch = ""
+split = "horizontal"
+
+[[startup.panes]]
+command = ""
+worktree = false
+branch = ""
+split = "horizontal"
 
 [pane]
 border_style = "rounded"

@@ -150,6 +150,10 @@ pub struct StartupPane {
     pub command: String,
     pub worktree: bool,
     pub branch: String,
+    /// Split direction for this pane: "vertical" or "horizontal".
+    /// Ignored for the first pane (it is the initial pane, not a split target).
+    /// Defaults to alternating (v/h/v/h...) when omitted or empty.
+    pub split: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

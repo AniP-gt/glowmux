@@ -2963,10 +2963,16 @@ impl App {
             let ws = self.ws_mut();
             ws.panes.insert(new_id, pane);
 
-            let direction = if i % 2 == 1 {
-                SplitDirection::Vertical
-            } else {
-                SplitDirection::Horizontal
+            let direction = match startup_pane.split.to_lowercase().as_str() {
+                "vertical" | "v" => SplitDirection::Vertical,
+                "horizontal" | "h" => SplitDirection::Horizontal,
+                _ => {
+                    if i % 2 == 1 {
+                        SplitDirection::Vertical
+                    } else {
+                        SplitDirection::Horizontal
+                    }
+                }
             };
             ws.layout.split_pane(focused, new_id, direction);
             ws.focused_pane_id = new_id;
