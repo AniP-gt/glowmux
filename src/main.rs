@@ -225,8 +225,10 @@ fn run_event_loop(
                     }
                 }
                 Event::Paste(text) => {
-                    app.forward_paste_to_pty(&text)?;
-                    app.paste_cooldown = 5;
+                    if !app.handle_paste_in_dialog(&text) {
+                        app.forward_paste_to_pty(&text)?;
+                        app.paste_cooldown = 5;
+                    }
                     app.dirty = true;
                 }
                 Event::Mouse(mouse) => {
