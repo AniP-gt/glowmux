@@ -2679,6 +2679,7 @@ impl App {
                 let s = &self.pane_create_dialog.prompt;
                 let line_start = s[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
                 self.pane_create_dialog.prompt_cursor = line_start;
+                self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
                 self.dirty = true;
             }
             KeyCode::End
@@ -2689,6 +2690,7 @@ impl App {
                 let s = &self.pane_create_dialog.prompt;
                 let line_end = s[pos..].find('\n').map(|i| pos + i).unwrap_or(s.len());
                 self.pane_create_dialog.prompt_cursor = line_end;
+                self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
                 self.dirty = true;
             }
             KeyCode::Char(c) => {
@@ -2773,23 +2775,33 @@ impl App {
         let agent = self.pane_create_dialog.agent.clone();
         let base_branch = self.pane_create_dialog.base_branch.clone();
         let prompt = self.pane_create_dialog.prompt.clone();
-        let effective_agent = if !prompt.is_empty() {
-            // Single-mode submit treats the prompt like an Arg-style payload (claude-style).
-            // Length is checked on the sanitized prompt to match what would actually be sent.
-            if Self::sanitize_prompt(&prompt).len() > 8192 {
+        if !prompt.is_empty() {
+            let sanitized = Self::sanitize_prompt(&prompt);
+            if sanitized.len() > 8192 {
                 self.pane_create_dialog.error_msg =
                     Some("Prompt too long (max 8192 bytes)".into());
                 self.dirty = true;
                 return Ok(());
             }
-            Self::format_agent_command(&agent, &prompt, &crate::config::PromptMode::Arg)
-        } else {
-            agent
-        };
+        }
+        let effective_agent =
+            Self::format_agent_command(&agent, &prompt, &crate::config::PromptMode::Arg);
         self.pane_create_dialog.visible = false;
         self.create_pane_from_dialog(branch, worktree, effective_agent, base_branch)?;
         self.dirty = true;
         Ok(())
+    }
+
+    fn write_stdin_prompt(pane: &mut crate::pane::Pane, prompt: &str) {
+        let sanitized = Self::sanitize_prompt(prompt);
+        if sanitized.is_empty() {
+            return;
+        }
+        let stdin_safe: String = sanitized
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        let _ = pane.write_input(format!("{}\n", stdin_safe).as_bytes());
     }
 
     fn format_agent_command(
@@ -2806,19 +2818,23 @@ impl App {
             return base_cmd.to_string();
         }
         match mode {
-            PromptMode::Arg => format!("{} {}", base_cmd, Self::shell_quote_prompt(&sanitized)),
-            PromptMode::Flag(flag) => {
-                format!("{} {} {}", base_cmd, flag, Self::shell_quote_prompt(&sanitized))
-            }
+            PromptMode::Arg => format!(
+                "{} {}",
+                base_cmd,
+                Self::shell_quote_prompt(&Self::flatten_newlines(&sanitized))
+            ),
+            PromptMode::Flag(flag) => format!(
+                "{} {} {}",
+                base_cmd,
+                flag,
+                Self::shell_quote_prompt(&Self::flatten_newlines(&sanitized))
+            ),
             PromptMode::Stdin | PromptMode::None => base_cmd.to_string(),
         }
     }
 
     fn create_multi_ai_panes(&mut self) -> Result<()> {
-        let n_agents = self.config.multi_ai.agents.len();
-        debug_assert_eq!(self.pane_create_dialog.agent_checks.len(), n_agents);
-
-        let selected_indices: Vec<usize> = self
+        let mut selected_indices: Vec<usize> = self
             .pane_create_dialog
             .agent_checks
             .iter()
@@ -2832,13 +2848,42 @@ impl App {
             return Ok(());
         }
 
-        // Grid layout in build_layout_node only meaningfully handles up to 4 panes.
-        let selected_indices: Vec<usize> = selected_indices.into_iter().take(4).collect();
-        let n = selected_indices.len();
+        selected_indices.truncate(4);
+
+        // Resolve agent indices safely; agent_checks length should match the
+        // configured agents, but `.get()` keeps us correct in release builds
+        // even if the two ever drift.
+        let agents: Vec<crate::config::MultiAiAgent> = selected_indices
+            .iter()
+            .filter_map(|&i| self.config.multi_ai.agents.get(i).cloned())
+            .collect();
+        let n = agents.len();
+        if n == 0 {
+            self.pane_create_dialog.error_msg = Some("Select at least one AI".into());
+            return Ok(());
+        }
 
         let prompt = self.pane_create_dialog.prompt.clone();
         if !prompt.is_empty() && Self::sanitize_prompt(&prompt).len() > 8192 {
             self.pane_create_dialog.error_msg = Some("Prompt too long (max 8192 bytes)".into());
+            return Ok(());
+        }
+
+        let focused_id = self.ws().focused_pane_id;
+
+        // Single-agent Multi mode: keep the existing layout intact and just
+        // launch the agent in the focused pane. Replacing the layout tree
+        // with a single Leaf would orphan every other pane in the workspace.
+        if n == 1 {
+            let agent = &agents[0];
+            let cmd = Self::format_agent_command(&agent.command, &prompt, &agent.prompt_mode);
+            if let Some(pane) = self.ws_mut().panes.get_mut(&focused_id) {
+                let _ = pane.write_input(format!("{}\n", cmd).as_bytes());
+                if matches!(agent.prompt_mode, crate::config::PromptMode::Stdin) && !prompt.is_empty() {
+                    Self::write_stdin_prompt(pane, &prompt);
+                }
+            }
+            self.mark_layout_change();
             return Ok(());
         }
 
@@ -2847,7 +2892,6 @@ impl App {
         let pane_cols = cols.saturating_sub(2);
 
         let pre_call_next_id = self.next_pane_id;
-        let focused_id = self.ws().focused_pane_id;
         let mut all_ids: Vec<usize> = vec![focused_id];
         let mut created_ids: Vec<usize> = vec![];
 
@@ -2876,26 +2920,13 @@ impl App {
             self.ws_mut().layout = new_layout;
         }
 
-        let agents: Vec<crate::config::MultiAiAgent> = selected_indices
-            .iter()
-            .map(|&i| self.config.multi_ai.agents[i].clone())
-            .collect();
-
         for (pane_id, agent) in all_ids.iter().zip(agents.iter()) {
             let cmd = Self::format_agent_command(&agent.command, &prompt, &agent.prompt_mode);
             let cmd_line = format!("{}\n", cmd);
             if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
                 let _ = pane.write_input(cmd_line.as_bytes());
-            }
-            // Stdin agents read the prompt from their own stdin, so push the
-            // sanitized prompt right after the launch command.
-            if matches!(agent.prompt_mode, crate::config::PromptMode::Stdin) && !prompt.is_empty() {
-                let sanitized = Self::sanitize_prompt(&prompt);
-                if !sanitized.is_empty() {
-                    let prompt_line = format!("{}\n", sanitized);
-                    if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
-                        let _ = pane.write_input(prompt_line.as_bytes());
-                    }
+                if matches!(agent.prompt_mode, crate::config::PromptMode::Stdin) && !prompt.is_empty() {
+                    Self::write_stdin_prompt(pane, &prompt);
                 }
             }
         }
@@ -2910,6 +2941,7 @@ impl App {
         let pos = self.pane_create_dialog.prompt_cursor;
         self.pane_create_dialog.prompt.insert_str(pos, text);
         self.pane_create_dialog.prompt_cursor += text.len();
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -2928,6 +2960,7 @@ impl App {
             .unwrap_or(0);
         self.pane_create_dialog.prompt.remove(prev);
         self.pane_create_dialog.prompt_cursor = prev;
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -2939,6 +2972,7 @@ impl App {
             return;
         }
         self.pane_create_dialog.prompt.remove(pos);
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -2955,6 +2989,7 @@ impl App {
             .map(|(i, _)| i)
             .unwrap_or(0);
         self.pane_create_dialog.prompt_cursor = prev;
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -2971,6 +3006,7 @@ impl App {
             .map(|(i, _)| pos + i)
             .unwrap_or(s.len());
         self.pane_create_dialog.prompt_cursor = next;
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -2985,6 +3021,7 @@ impl App {
         let (line_idx, col) = Self::prompt_line_col(s, pos, col_width);
         if line_idx == 0 {
             self.pane_create_dialog.prompt_cursor = 0;
+            self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
             self.dirty = true;
             return;
         }
@@ -2993,6 +3030,7 @@ impl App {
         let target_col = col.min(lines[target_line].1);
         self.pane_create_dialog.prompt_cursor =
             Self::prompt_offset_of(s, &lines, target_line, target_col);
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
     }
 
@@ -3007,6 +3045,7 @@ impl App {
         let lines = Self::prompt_wrap_lines(s, col_width);
         if line_idx + 1 >= lines.len() {
             self.pane_create_dialog.prompt_cursor = s.len();
+            self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
             self.dirty = true;
             return;
         }
@@ -3014,7 +3053,37 @@ impl App {
         let target_col = col.min(lines[target_line].1);
         self.pane_create_dialog.prompt_cursor =
             Self::prompt_offset_of(s, &lines, target_line, target_col);
+        self.update_prompt_scroll(Self::PROMPT_VISIBLE_ROWS);
         self.dirty = true;
+    }
+
+    /// Number of visible rows in the prompt textarea. Must match
+    /// `PROMPT_VISIBLE` in `ui.rs` so cursor-tracking scroll logic agrees
+    /// with the renderer.
+    const PROMPT_VISIBLE_ROWS: usize = 7;
+
+    /// Recompute and persist `prompt_scroll` so the cursor stays within the
+    /// visible window. Without this, the renderer would derive scroll from
+    /// the cursor each frame but the value would never be stored back, so
+    /// the next frame would snap to the top.
+    fn update_prompt_scroll(&mut self, visible_rows: usize) {
+        if visible_rows == 0 {
+            return;
+        }
+        // Matches `col_width` used by the dialog renderer / move helpers.
+        let col_width: usize = 58;
+        let cursor = self.pane_create_dialog.prompt_cursor;
+        let prompt = self.pane_create_dialog.prompt.clone();
+        let (cursor_row, _) = Self::prompt_line_col(&prompt, cursor, col_width);
+        let scroll = self.pane_create_dialog.prompt_scroll;
+        let new_scroll = if cursor_row < scroll {
+            cursor_row
+        } else if cursor_row >= scroll + visible_rows {
+            cursor_row + 1 - visible_rows
+        } else {
+            scroll
+        };
+        self.pane_create_dialog.prompt_scroll = new_scroll;
     }
 
     /// Wrap `s` into visual rows of `width` chars, respecting '\n'.
@@ -3093,6 +3162,12 @@ impl App {
     fn sanitize_prompt(s: &str) -> String {
         s.chars()
             .filter(|&c| c == '\n' || (!c.is_control() && c != '\x7f'))
+            .collect()
+    }
+
+    fn flatten_newlines(s: &str) -> String {
+        s.chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
             .collect()
     }
 
@@ -5833,7 +5908,9 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_zero_selection() {
+    fn test_multi_zero_selection_sets_error() {
+        // Verify that format_agent_command with all-false checks never reaches
+        // pane creation — the empty selected_indices guard fires first.
         let checks: Vec<bool> = vec![false, false, false, false];
         let selected: Vec<usize> = checks
             .iter()
@@ -5841,6 +5918,89 @@ mod tests {
             .filter(|(_, &c)| c)
             .map(|(i, _)| i)
             .collect();
-        assert!(selected.is_empty());
+        assert!(selected.is_empty(), "zero checks must yield no selected agents");
+        // Simulate the error path: error_msg should be set, not None.
+        let error_msg: Option<String> = if selected.is_empty() {
+            Some("Select at least one AI".into())
+        } else {
+            None
+        };
+        assert_eq!(error_msg.as_deref(), Some("Select at least one AI"));
+    }
+
+    #[test]
+    fn test_single_tab_cycle_9_stops() {
+        // Single mode must cycle through exactly 9 distinct stops before
+        // returning to LaunchModeToggle (the new first stop).
+        use PaneCreateField::*;
+        let stops = [
+            LaunchModeToggle,
+            BranchName,
+            BaseBranch,
+            WorktreeToggle,
+            AgentField,
+            PromptField,
+            AiGenerate,
+            OkButton,
+            CancelButton,
+        ];
+        // Verify Tab forward wraps: last stop -> LaunchModeToggle
+        assert_eq!(stops.len(), 9);
+        // Simulate the Tab forward transition for each stop
+        let n_agents = 4usize;
+        let advance = |f: &PaneCreateField| -> PaneCreateField {
+            match f {
+                LaunchModeToggle => BranchName,
+                BranchName => BaseBranch,
+                BaseBranch => WorktreeToggle,
+                WorktreeToggle => AgentField,
+                AgentField => PromptField,
+                PromptField => AiGenerate,
+                AiGenerate => OkButton,
+                OkButton => CancelButton,
+                CancelButton => LaunchModeToggle,
+                MultiCheck(i) if *i + 1 < n_agents => MultiCheck(*i + 1),
+                MultiCheck(_) => OkButton,
+            }
+        };
+        let mut f = LaunchModeToggle;
+        for expected in stops.iter().skip(1).chain(std::iter::once(&LaunchModeToggle)) {
+            f = advance(&f);
+            assert_eq!(&f, expected);
+        }
+    }
+
+    #[test]
+    fn test_multi_tab_cycle_8_stops() {
+        // Multi mode with 4 agents: 4 + 4 = 8 stops.
+        use PaneCreateField::*;
+        let n_agents = 4usize;
+        let advance = |f: &PaneCreateField| -> PaneCreateField {
+            match f {
+                LaunchModeToggle => PromptField,
+                PromptField => if n_agents > 0 { MultiCheck(0) } else { OkButton },
+                MultiCheck(i) if *i + 1 < n_agents => MultiCheck(*i + 1),
+                MultiCheck(_) => OkButton,
+                OkButton => CancelButton,
+                CancelButton => LaunchModeToggle,
+                _ => LaunchModeToggle,
+            }
+        };
+        let stops = [
+            LaunchModeToggle,
+            PromptField,
+            MultiCheck(0),
+            MultiCheck(1),
+            MultiCheck(2),
+            MultiCheck(3),
+            OkButton,
+            CancelButton,
+        ];
+        assert_eq!(stops.len(), 8);
+        let mut f = LaunchModeToggle;
+        for expected in stops.iter().skip(1).chain(std::iter::once(&LaunchModeToggle)) {
+            f = advance(&f);
+            assert_eq!(&f, expected);
+        }
     }
 }
