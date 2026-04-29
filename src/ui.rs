@@ -1775,7 +1775,7 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
     //          + 1 gap + 1 buttons + 2 hint/err + 2 spare
     let popup_h = (1 + 4 + 1 + PROMPT_VISIBLE as u16 + 2 + 1 + 1 + 2 + 2)
         .min(area.height.saturating_sub(4));
-    let popup_w = 70u16.min(area.width.saturating_sub(4));
+    let popup_w = area.width.saturating_sub(8).max(70).min(area.width.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(x, y, popup_w, popup_h);
@@ -1985,12 +1985,12 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
     // Scrollbar indicator (right edge of border) when content overflows
     if total_rows > PROMPT_VISIBLE {
         let bar_h = PROMPT_VISIBLE;
-        let thumb_size = (PROMPT_VISIBLE * bar_h / total_rows).max(1);
+        let thumb_size = (PROMPT_VISIBLE * bar_h / total_rows).max(1).min(bar_h);
         let max_scroll = total_rows.saturating_sub(PROMPT_VISIBLE);
         let thumb_pos = if max_scroll == 0 {
             0
         } else {
-            scroll * (bar_h - thumb_size) / max_scroll
+            (scroll * bar_h.saturating_sub(thumb_size) / max_scroll).min(bar_h.saturating_sub(thumb_size))
         };
         for i in 0..bar_h {
             let bar_char = if i >= thumb_pos && i < thumb_pos + thumb_size {
