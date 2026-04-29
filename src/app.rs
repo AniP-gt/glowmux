@@ -2509,21 +2509,21 @@ impl App {
                 let in_multi = self.pane_create_dialog.launch_mode == LaunchMode::Multi;
                 self.pane_create_dialog.focused_field = if in_multi {
                     match &self.pane_create_dialog.focused_field {
-                        PaneCreateField::LaunchModeToggle => PaneCreateField::PromptField,
-                        PaneCreateField::PromptField => {
+                        PaneCreateField::LaunchModeToggle => {
                             if n_agents > 0 {
                                 PaneCreateField::MultiCheck(0)
                             } else {
-                                PaneCreateField::OkButton
+                                PaneCreateField::PromptField
                             }
                         }
                         PaneCreateField::MultiCheck(i) => {
                             if *i + 1 < n_agents {
                                 PaneCreateField::MultiCheck(*i + 1)
                             } else {
-                                PaneCreateField::OkButton
+                                PaneCreateField::PromptField
                             }
                         }
+                        PaneCreateField::PromptField => PaneCreateField::OkButton,
                         PaneCreateField::OkButton => PaneCreateField::CancelButton,
                         PaneCreateField::CancelButton => PaneCreateField::LaunchModeToggle,
                         _ => PaneCreateField::LaunchModeToggle,
@@ -2550,21 +2550,21 @@ impl App {
                 self.pane_create_dialog.focused_field = if in_multi {
                     match &self.pane_create_dialog.focused_field {
                         PaneCreateField::LaunchModeToggle => PaneCreateField::CancelButton,
-                        PaneCreateField::PromptField => PaneCreateField::LaunchModeToggle,
                         PaneCreateField::MultiCheck(i) => {
                             if *i == 0 {
-                                PaneCreateField::PromptField
+                                PaneCreateField::LaunchModeToggle
                             } else {
                                 PaneCreateField::MultiCheck(*i - 1)
                             }
                         }
-                        PaneCreateField::OkButton => {
+                        PaneCreateField::PromptField => {
                             if n_agents > 0 {
                                 PaneCreateField::MultiCheck(n_agents - 1)
                             } else {
-                                PaneCreateField::PromptField
+                                PaneCreateField::LaunchModeToggle
                             }
                         }
+                        PaneCreateField::OkButton => PaneCreateField::PromptField,
                         PaneCreateField::CancelButton => PaneCreateField::OkButton,
                         _ => PaneCreateField::LaunchModeToggle,
                     }
@@ -2746,7 +2746,12 @@ impl App {
     fn toggle_launch_mode(&mut self) {
         self.pane_create_dialog.launch_mode = match self.pane_create_dialog.launch_mode {
             LaunchMode::Single => {
-                self.pane_create_dialog.focused_field = PaneCreateField::PromptField;
+                self.pane_create_dialog.focused_field =
+                    if self.pane_create_dialog.agent_checks.is_empty() {
+                        PaneCreateField::PromptField
+                    } else {
+                        PaneCreateField::MultiCheck(0)
+                    };
                 LaunchMode::Multi
             }
             LaunchMode::Multi => {
@@ -5977,10 +5982,10 @@ mod tests {
         let n_agents = 4usize;
         let advance = |f: &PaneCreateField| -> PaneCreateField {
             match f {
-                LaunchModeToggle => PromptField,
-                PromptField => if n_agents > 0 { MultiCheck(0) } else { OkButton },
+                LaunchModeToggle => if n_agents > 0 { MultiCheck(0) } else { PromptField },
                 MultiCheck(i) if *i + 1 < n_agents => MultiCheck(*i + 1),
-                MultiCheck(_) => OkButton,
+                MultiCheck(_) => PromptField,
+                PromptField => OkButton,
                 OkButton => CancelButton,
                 CancelButton => LaunchModeToggle,
                 _ => LaunchModeToggle,
@@ -5988,11 +5993,11 @@ mod tests {
         };
         let stops = [
             LaunchModeToggle,
-            PromptField,
             MultiCheck(0),
             MultiCheck(1),
             MultiCheck(2),
             MultiCheck(3),
+            PromptField,
             OkButton,
             CancelButton,
         ];
