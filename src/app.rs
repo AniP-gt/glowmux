@@ -761,7 +761,7 @@ impl App {
             file_tree_width: config.layout.file_tree_width,
             preview_width: config.layout.preview_width,
             layout_swapped: true,
-            status_bar_visible: true,
+            status_bar_visible: false,
             dragging: None,
             hover_border: None,
             last_tab_rects: Vec::new(),
