@@ -1145,7 +1145,7 @@ impl App {
                     // Prefix + layout_cycle key — cycle layout mode
                     self.cycle_layout_mode();
                     return Ok(true);
-                } else if key.code == KeyCode::Char('[') {
+                } else if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::NONE {
                     self.enter_copy_mode();
                     return Ok(true);
                 } else if key.code == KeyCode::Char('w') {
