@@ -17,6 +17,7 @@ pub struct ConfigFile {
     pub ai_title_engine: AiTitleEngineConfig,
     pub filetree: FileTreeConfig,
     pub preview: PreviewConfig,
+    pub multi_ai: MultiAiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -154,6 +155,109 @@ pub struct StartupPane {
     /// Ignored for the first pane (it is the initial pane, not a split target).
     /// Defaults to alternating (v/h/v/h...) when omitted or empty.
     pub split: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    Arg,
+    Flag(String),
+    Stdin,
+    None,
+}
+
+impl Default for PromptMode {
+    fn default() -> Self {
+        PromptMode::None
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MultiAiAgent {
+    pub name: String,
+    pub command: String,
+    pub prompt_mode: PromptMode,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MultiAiConfig {
+    pub agents: Vec<MultiAiAgent>,
+}
+
+impl Default for MultiAiConfig {
+    fn default() -> Self {
+        Self {
+            agents: vec![
+                MultiAiAgent {
+                    name: "claude".into(),
+                    command: "claude".into(),
+                    prompt_mode: PromptMode::Arg,
+                },
+                MultiAiAgent {
+                    name: "opencode".into(),
+                    command: "opencode".into(),
+                    prompt_mode: PromptMode::Stdin,
+                },
+                MultiAiAgent {
+                    name: "gemini".into(),
+                    command: "gemini".into(),
+                    prompt_mode: PromptMode::Flag("-p".into()),
+                },
+                MultiAiAgent {
+                    name: "codex".into(),
+                    command: "codex".into(),
+                    prompt_mode: PromptMode::Stdin,
+                },
+            ],
+        }
+    }
+}
+
+impl MultiAiConfig {
+    /// Drop empty-command agents and downgrade unsafe Flag values to None
+    /// so that user-controlled flags cannot inject extra shell arguments.
+    pub fn validated(mut self) -> Self {
+        self.agents.retain(|a| !a.command.is_empty());
+        for agent in &mut self.agents {
+            if let PromptMode::Flag(ref flag) = agent.prompt_mode {
+                if !is_safe_flag(flag) {
+                    agent.prompt_mode = PromptMode::None;
+                }
+            }
+        }
+        self
+    }
+}
+
+fn is_safe_flag(flag: &str) -> bool {
+    let bytes = flag.as_bytes();
+    if bytes.len() < 2 {
+        return false;
+    }
+    if bytes[0] != b'-' {
+        return false;
+    }
+    let rest = &bytes[1..];
+    let (after_dashes, second_pos) = if rest[0] == b'-' {
+        if rest.len() < 2 {
+            return false;
+        }
+        (&rest[1..], 1)
+    } else {
+        (rest, 0)
+    };
+    let _ = second_pos;
+    if after_dashes.is_empty() {
+        return false;
+    }
+    if !after_dashes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    after_dashes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -532,7 +636,10 @@ impl ConfigFile {
             if path.exists() {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => match toml::from_str::<ConfigFile>(&content) {
-                        Ok(config) => return config,
+                        Ok(mut config) => {
+                            config.multi_ai = config.multi_ai.validated();
+                            return config;
+                        }
                         Err(e) => {
                             eprintln!("glowmux: config parse error (using defaults): {}", e);
                         }
@@ -619,5 +726,49 @@ prefer_delta = true
     fn test_load_returns_default_when_no_file() {
         let config = ConfigFile::load();
         assert_eq!(config.terminal.scrollback, 10000);
+    }
+
+    #[test]
+    fn test_multi_ai_default_agents() {
+        let cfg = MultiAiConfig::default();
+        assert_eq!(cfg.agents.len(), 4);
+        assert_eq!(cfg.agents[0].name, "claude");
+        assert_eq!(cfg.agents[0].prompt_mode, PromptMode::Arg);
+        assert_eq!(cfg.agents[2].name, "gemini");
+        assert_eq!(cfg.agents[2].prompt_mode, PromptMode::Flag("-p".into()));
+    }
+
+    #[test]
+    fn test_multi_ai_toml_roundtrip() {
+        let orig = MultiAiConfig::default();
+        let s = toml::to_string(&orig).unwrap();
+        let parsed: MultiAiConfig = toml::from_str(&s).unwrap();
+        assert_eq!(parsed.agents.len(), 4);
+        assert_eq!(parsed.agents[2].prompt_mode, PromptMode::Flag("-p".into()));
+    }
+
+    #[test]
+    fn test_flag_validation_rejects_injection() {
+        let cfg = MultiAiConfig {
+            agents: vec![MultiAiAgent {
+                name: "evil".into(),
+                command: "evil".into(),
+                prompt_mode: PromptMode::Flag("--flag 'x'; evil".into()),
+            }],
+        };
+        let validated = cfg.validated();
+        assert_eq!(validated.agents[0].prompt_mode, PromptMode::None);
+    }
+
+    #[test]
+    fn test_flag_validation_accepts_common_flags() {
+        for flag in &["-p", "--prompt", "-x", "--flag-name", "--flag_name"] {
+            assert!(is_safe_flag(flag), "should accept {}", flag);
+        }
+        for flag in &[
+            "", "-", "--", "p", "-1", "--1bad", "-p x", "-p;rm", "-p\nrm",
+        ] {
+            assert!(!is_safe_flag(flag), "should reject {:?}", flag);
+        }
     }
 }

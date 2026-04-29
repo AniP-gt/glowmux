@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{
-    App, CloseConfirmDialog, CloseConfirmFocus, CopyModeState, DragTarget, FocusTarget,
+    App, CloseConfirmDialog, CloseConfirmFocus, CopyModeState, DragTarget, FocusTarget, LaunchMode,
     PaneCreateDialog, PaneCreateField, PaneStatus, SidebarMode, WorktreeCleanupDialog, FEATURES,
     SETTINGS_ITEMS,
 };
@@ -1754,8 +1754,26 @@ fn vt100_color_to_ratatui(color: vt100::Color) -> Color {
 }
 
 fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateDialog) {
-    let popup_w = 50u16.min(area.width.saturating_sub(4));
-    let popup_h = 13u16.min(area.height.saturating_sub(4));
+    // Inner row layout (Single mode):
+    //   0  Mode toggle  [Single]/[Multi]
+    //   1  Branch
+    //   2  Base
+    //   3  Worktree
+    //   4  Agent
+    //   5  "Prompt:" label + prompt box top border
+    //   6-12  7 visible prompt rows
+    //   13 prompt box bottom border
+    //   14 buttons
+    //   15 error
+    //   16 hint
+    // Multi mode reuses rows 0, 5..13 (mode + prompt) and renders agent
+    // checkboxes in rows 1..4, leaving 14/15/16 for buttons/error/hint.
+    const PROMPT_VISIBLE: usize = 7;
+    // popup_h = 1 mode + 4 fields + 1 label + PROMPT_VISIBLE rows + 2 border
+    //          + 1 gap + 1 buttons + 2 hint/err + 2 spare
+    let popup_h = (1 + 4 + 1 + PROMPT_VISIBLE as u16 + 2 + 1 + 1 + 2 + 2)
+        .min(area.height.saturating_sub(4));
+    let popup_w = 70u16.min(area.width.saturating_sub(4));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(x, y, popup_w, popup_h);
@@ -1773,74 +1791,225 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
 
     let hl = Style::default().fg(Color::Yellow);
     let normal = Style::default().fg(TEXT);
+    let multi = dialog.launch_mode == LaunchMode::Multi;
 
-    let branch_style = if dialog.focused_field == PaneCreateField::BranchName {
-        hl
+    // -- Mode toggle row (row 0) --
+    let mode_focused = dialog.focused_field == PaneCreateField::LaunchModeToggle;
+    let single_active = dialog.launch_mode == LaunchMode::Single;
+    let multi_active = dialog.launch_mode == LaunchMode::Multi;
+    let single_style = if mode_focused && single_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if single_active {
+        Style::default().fg(Color::Cyan)
     } else {
-        normal
+        Style::default().fg(Color::DarkGray)
     };
-    let branch_text = format!("Branch: [{}]", dialog.branch_name);
+    let multi_style = if mode_focused && multi_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else if multi_active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let mode_line = Line::from(vec![
+        Span::raw("Mode: "),
+        Span::styled("[Single]", single_style),
+        Span::raw("  "),
+        Span::styled("[Multi]", multi_style),
+    ]);
     frame.render_widget(
-        Paragraph::new(branch_text).style(branch_style),
+        Paragraph::new(mode_line),
         Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
     );
 
-    let base_style = if dialog.focused_field == PaneCreateField::BaseBranch {
-        hl
-    } else {
-        normal
-    };
-    let base_text = format!("Base:   [{}]", dialog.base_branch);
-    frame.render_widget(
-        Paragraph::new(base_text).style(base_style),
-        Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1),
-    );
+    // -- Single-only fields (Branch / Base / Worktree / Agent) on rows 1..4 --
+    if !multi {
+        let branch_style = if dialog.focused_field == PaneCreateField::BranchName {
+            hl
+        } else {
+            normal
+        };
+        frame.render_widget(
+            Paragraph::new(format!("Branch: [{}]", dialog.branch_name)).style(branch_style),
+            Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1),
+        );
 
-    let wt_style = if dialog.focused_field == PaneCreateField::WorktreeToggle {
-        hl
-    } else {
-        normal
-    };
-    let wt_check = if dialog.worktree_enabled { "x" } else { " " };
-    let wt_text = format!("Worktree: [{}] create", wt_check);
-    frame.render_widget(
-        Paragraph::new(wt_text).style(wt_style),
-        Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
-    );
+        let base_style = if dialog.focused_field == PaneCreateField::BaseBranch {
+            hl
+        } else {
+            normal
+        };
+        frame.render_widget(
+            Paragraph::new(format!("Base:   [{}]", dialog.base_branch)).style(base_style),
+            Rect::new(inner.x + 1, inner.y + 2, inner.width.saturating_sub(2), 1),
+        );
 
-    let agent_style = if dialog.focused_field == PaneCreateField::AgentField {
-        hl
-    } else {
-        normal
-    };
-    let agent_text = format!(
-        "Agent:  [{}]",
-        if dialog.agent.is_empty() {
+        let wt_style = if dialog.focused_field == PaneCreateField::WorktreeToggle {
+            hl
+        } else {
+            normal
+        };
+        let wt_check = if dialog.worktree_enabled { "x" } else { " " };
+        frame.render_widget(
+            Paragraph::new(format!("Worktree: [{}] create", wt_check)).style(wt_style),
+            Rect::new(inner.x + 1, inner.y + 3, inner.width.saturating_sub(2), 1),
+        );
+
+        let agent_style = if dialog.focused_field == PaneCreateField::AgentField {
+            hl
+        } else {
+            normal
+        };
+        let agent_display = if dialog.agent.is_empty() {
             "none"
         } else {
             &dialog.agent
+        };
+        frame.render_widget(
+            Paragraph::new(format!("Agent:  [{}]", agent_display)).style(agent_style),
+            Rect::new(inner.x + 1, inner.y + 4, inner.width.saturating_sub(2), 1),
+        );
+    } else {
+        // Multi mode: render up to 4 agent checkboxes on rows 1..4.
+        for (i, label) in dialog.agent_labels.iter().enumerate().take(4) {
+            let checked = dialog.agent_checks.get(i).copied().unwrap_or(false);
+            let is_focused = dialog.focused_field == PaneCreateField::MultiCheck(i);
+            let check_str = if checked { "[x]" } else { "[ ]" };
+            let check_style = if checked {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let row_style = if is_focused { hl } else { normal };
+            let line = Line::from(vec![
+                Span::styled(check_str, check_style),
+                Span::styled(format!(" {}", label), row_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(
+                    inner.x + 1,
+                    inner.y + 1 + i as u16,
+                    inner.width.saturating_sub(2),
+                    1,
+                ),
+            );
         }
-    );
+    }
+
+    // -- Prompt multiline text area (row 5..) --
+    let prompt_focused = dialog.focused_field == PaneCreateField::PromptField;
+    let prompt_border_style = if prompt_focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let label_style = if prompt_focused { hl } else { normal };
     frame.render_widget(
-        Paragraph::new(agent_text).style(agent_style),
-        Rect::new(inner.x + 1, inner.y + 3, inner.width.saturating_sub(2), 1),
+        Paragraph::new("Prompt:").style(label_style),
+        Rect::new(inner.x + 1, inner.y + 5, 7, 1),
     );
 
-    let prompt_style = if dialog.focused_field == PaneCreateField::PromptField {
-        hl
-    } else {
-        normal
+    let box_x = inner.x + 9;
+    let box_w = inner.width.saturating_sub(10);
+    let box_y_top = inner.y + 5;
+    // Draw border using a Block
+    let text_area_outer = Rect::new(box_x, box_y_top, box_w, PROMPT_VISIBLE as u16 + 2);
+    let text_area_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(prompt_border_style)
+        .style(Style::default().bg(PANEL_BG));
+    let text_inner = text_area_block.inner(text_area_outer);
+    frame.render_widget(text_area_block, text_area_outer);
+
+    // Build wrapped lines for the prompt
+    let col_width = text_inner.width as usize;
+    let rows = prompt_wrap_lines_ui(&dialog.prompt, col_width);
+    let total_rows = rows.len();
+
+    // Compute cursor visual row/col
+    let (cursor_row, cursor_col) = prompt_cursor_row_col(&dialog.prompt, dialog.prompt_cursor, col_width);
+
+    // Scroll: keep cursor_row within [scroll, scroll + PROMPT_VISIBLE)
+    let scroll = {
+        let mut s = dialog.prompt_scroll;
+        if cursor_row < s {
+            s = cursor_row;
+        }
+        if cursor_row >= s + PROMPT_VISIBLE {
+            s = cursor_row + 1 - PROMPT_VISIBLE;
+        }
+        s
     };
-    let prompt_display: String = dialog
-        .prompt
-        .chars()
-        .take(inner.width.saturating_sub(12) as usize)
-        .collect();
-    let prompt_text = format!("Prompt: [{}]", prompt_display);
-    frame.render_widget(
-        Paragraph::new(prompt_text).style(prompt_style),
-        Rect::new(inner.x + 1, inner.y + 4, inner.width.saturating_sub(2), 1),
-    );
+
+    // Render visible rows
+    for vis_row in 0..PROMPT_VISIBLE {
+        let abs_row = scroll + vis_row;
+        let render_y = text_inner.y + vis_row as u16;
+        if abs_row >= total_rows {
+            break;
+        }
+        let (row_start, row_char_len) = rows[abs_row];
+        let row_text: String = dialog.prompt[row_start..]
+            .chars()
+            .take(row_char_len)
+            .collect();
+
+        if prompt_focused && abs_row == cursor_row {
+            // Split at cursor column and render with cursor highlight
+            let left: String = row_text.chars().take(cursor_col).collect();
+            let cursor_char: String = row_text.chars().nth(cursor_col).map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
+            let right: String = row_text.chars().skip(cursor_col + 1).collect();
+
+            let spans = vec![
+                Span::styled(left, hl),
+                Span::styled(cursor_char, Style::default().fg(Color::Black).bg(Color::Yellow)),
+                Span::styled(right, hl),
+            ];
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(text_inner.x, render_y, text_inner.width, 1),
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(row_text).style(normal),
+                Rect::new(text_inner.x, render_y, text_inner.width, 1),
+            );
+        }
+    }
+
+    // Scrollbar indicator (right edge of border) when content overflows
+    if total_rows > PROMPT_VISIBLE {
+        let bar_h = PROMPT_VISIBLE;
+        let thumb_size = (PROMPT_VISIBLE * bar_h / total_rows).max(1);
+        let max_scroll = total_rows.saturating_sub(PROMPT_VISIBLE);
+        let thumb_pos = if max_scroll == 0 {
+            0
+        } else {
+            scroll * (bar_h - thumb_size) / max_scroll
+        };
+        for i in 0..bar_h {
+            let bar_char = if i >= thumb_pos && i < thumb_pos + thumb_size {
+                "█"
+            } else {
+                "░"
+            };
+            frame.render_widget(
+                Paragraph::new(bar_char).style(Style::default().fg(Color::DarkGray)),
+                Rect::new(
+                    text_area_outer.x + text_area_outer.width.saturating_sub(1),
+                    text_area_outer.y + 1 + i as u16,
+                    1,
+                    1,
+                ),
+            );
+        }
+    }
+
+    // Buttons row: below the text area box
+    let buttons_y = box_y_top + PROMPT_VISIBLE as u16 + 2 + 1;
 
     let ai_focused = dialog.focused_field == PaneCreateField::AiGenerate;
     let ok_focused = dialog.focused_field == PaneCreateField::OkButton;
@@ -1852,34 +2021,29 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         "[AI Generate]"
     };
     let ai_style = if ai_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Cyan)
     };
     let ok_style = if ok_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if dialog.generating_name {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(ACCENT_GREEN)
     };
     let cancel_style = if cancel_focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Red)
     };
 
-    let buttons_y = inner.y + 6;
-    frame.render_widget(
-        Paragraph::new(ai_label).style(ai_style),
-        Rect::new(inner.x + 1, buttons_y, 15, 1),
-    );
+    if !multi {
+        frame.render_widget(
+            Paragraph::new(ai_label).style(ai_style),
+            Rect::new(inner.x + 1, buttons_y, 15, 1),
+        );
+    }
     frame.render_widget(
         Paragraph::new("[OK]").style(ok_style),
         Rect::new(inner.x + inner.width.saturating_sub(16), buttons_y, 4, 1),
@@ -1889,23 +2053,82 @@ fn render_pane_create_dialog(frame: &mut Frame, area: Rect, dialog: &PaneCreateD
         Rect::new(inner.x + inner.width.saturating_sub(10), buttons_y, 8, 1),
     );
 
-    // Error message (shown when worktree creation fails)
+    // Error / Hints
     if let Some(ref err) = dialog.error_msg {
         let err_y = inner.y + inner.height.saturating_sub(2);
-        let err_text = err.as_str();
         frame.render_widget(
-            Paragraph::new(err_text).style(Style::default().fg(Color::Red)),
+            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
             Rect::new(inner.x + 1, err_y, inner.width.saturating_sub(2), 1),
         );
     }
 
-    // Hints
     let hint_y = inner.y + inner.height.saturating_sub(1);
+    let hint_text = if prompt_focused {
+        "Tab: next  Enter: newline  Alt+Enter: confirm  Esc: cancel"
+    } else {
+        "Tab: next  Enter: confirm  Esc: cancel"
+    };
     frame.render_widget(
-        Paragraph::new("Tab: next  Enter: confirm  Esc: cancel")
-            .style(Style::default().fg(TEXT_DIM)),
+        Paragraph::new(hint_text).style(Style::default().fg(TEXT_DIM)),
         Rect::new(inner.x + 1, hint_y, inner.width.saturating_sub(2), 1),
     );
+}
+
+/// Wrap `s` into visual rows of `width` chars, respecting '\n'.
+/// Returns vec of (byte_start, char_len) per row.
+fn prompt_wrap_lines_ui(s: &str, width: usize) -> Vec<(usize, usize)> {
+    if width == 0 {
+        return vec![(0, 0)];
+    }
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    let mut byte_pos = 0usize;
+    for logical_line in s.split('\n') {
+        let chars: Vec<(usize, char)> = logical_line.char_indices().collect();
+        if chars.is_empty() {
+            rows.push((byte_pos, 0));
+            byte_pos += 1;
+            continue;
+        }
+        let mut start_char = 0usize;
+        loop {
+            let end_char = (start_char + width).min(chars.len());
+            let row_byte_start = byte_pos + chars[start_char].0;
+            rows.push((row_byte_start, end_char - start_char));
+            start_char = end_char;
+            if start_char >= chars.len() {
+                break;
+            }
+        }
+        byte_pos += logical_line.len();
+        if byte_pos < s.len() {
+            byte_pos += 1; // '\n'
+        }
+    }
+    if rows.is_empty() {
+        rows.push((0, 0));
+    }
+    rows
+}
+
+/// Return (row_index, col_in_row) for cursor byte position.
+fn prompt_cursor_row_col(s: &str, cursor: usize, width: usize) -> (usize, usize) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let rows = prompt_wrap_lines_ui(s, width);
+    for (i, &(start, char_len)) in rows.iter().enumerate() {
+        let next_start = if i + 1 < rows.len() {
+            rows[i + 1].0
+        } else {
+            s.len() + 1
+        };
+        if cursor >= start && cursor < next_start {
+            let col = s[start..cursor.min(s.len())].chars().count().min(char_len);
+            return (i, col);
+        }
+    }
+    let last = rows.len().saturating_sub(1);
+    (last, rows.last().map(|r| r.1).unwrap_or(0))
 }
 
 fn render_close_confirm_dialog(frame: &mut Frame, area: Rect, dialog: &CloseConfirmDialog) {
@@ -2182,7 +2405,7 @@ fn render_layout_picker(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(para, inner);
 }
 
-fn build_pane_list_lines(app: &App, is_focused: bool) -> Vec<Line<'_>> {
+fn build_pane_list_lines(app: &App, is_focused: bool, available_width: u16) -> Vec<Line<'_>> {
     let overlay = &app.pane_list_overlay;
     let status_colors = StatusColors::from_config(&app.config.status);
     let highlight_bg = if is_focused { FOCUS_BORDER } else { BORDER };
@@ -2227,9 +2450,19 @@ fn build_pane_list_lines(app: &App, is_focused: bool) -> Vec<Line<'_>> {
             Style::default().fg(TEXT)
         };
 
+        // marker(3) + "[N] "(4+digits) + "  "(2) + dot+space(2 if present) + branch
         let marker = if is_selected { " > " } else { "   " };
+        let prefix_width = 3usize + format!("[{}] ", i).len();
+        let dot_width = if dot_info.is_some() { 2usize } else { 0 };
+        let branch_width = unicode_width::UnicodeWidthStr::width(branch_part.as_str());
+        let suffix_width = 2 + dot_width + branch_width; // "  " separator + dot + branch
+        let title_budget = (available_width as usize)
+            .saturating_sub(prefix_width)
+            .saturating_sub(suffix_width);
+        let truncated_label = truncate_to_width(&label, title_budget);
+
         let mut row_spans = vec![Span::styled(marker, Style::default().fg(FOCUS_BORDER))];
-        row_spans.push(Span::styled(format!("[{}] {}  ", i, label), style));
+        row_spans.push(Span::styled(format!("[{}] {}  ", i, truncated_label), style));
         if let Some((dot, color)) = dot_info {
             row_spans.push(Span::styled(
                 format!("{} ", dot),
@@ -2275,7 +2508,7 @@ fn render_pane_list_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let lines = build_pane_list_lines(app, is_focused);
+    let lines = build_pane_list_lines(app, is_focused, inner.width);
 
     let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
     frame.render_widget(para, inner);
@@ -2309,16 +2542,10 @@ fn render_pane_list_overlay(app: &App, frame: &mut Frame, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(FOCUS_BORDER))
         .style(Style::default().bg(PANEL_BG));
+    let inner = outer_block.inner(dialog_rect);
     frame.render_widget(outer_block, dialog_rect);
 
-    let inner = Rect::new(
-        dialog_rect.x + 2,
-        dialog_rect.y + 1,
-        dialog_rect.width.saturating_sub(4),
-        dialog_rect.height.saturating_sub(2),
-    );
-
-    let lines = build_pane_list_lines(app, true);
+    let lines = build_pane_list_lines(app, true, inner.width);
 
     let para = Paragraph::new(lines).style(Style::default().bg(PANEL_BG));
     frame.render_widget(para, inner);

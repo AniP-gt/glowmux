@@ -193,8 +193,16 @@ pub enum Direction {
     Down,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum LaunchMode {
+    #[default]
+    Single,
+    Multi,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaneCreateField {
+    LaunchModeToggle,
     BranchName,
     BaseBranch,
     WorktreeToggle,
@@ -203,6 +211,7 @@ pub enum PaneCreateField {
     AiGenerate,
     OkButton,
     CancelButton,
+    MultiCheck(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -213,9 +222,16 @@ pub struct PaneCreateDialog {
     pub worktree_enabled: bool,
     pub agent: String,
     pub prompt: String,
+    /// Byte offset of the cursor within `prompt`.
+    pub prompt_cursor: usize,
+    /// First visible line row index for prompt scrolling.
+    pub prompt_scroll: usize,
     pub generating_name: bool,
     pub focused_field: PaneCreateField,
     pub error_msg: Option<String>,
+    pub launch_mode: LaunchMode,
+    pub agent_checks: Vec<bool>,
+    pub agent_labels: Vec<String>,
 }
 
 impl Default for PaneCreateDialog {
@@ -227,9 +243,14 @@ impl Default for PaneCreateDialog {
             worktree_enabled: false,
             agent: String::new(),
             prompt: String::new(),
+            prompt_cursor: 0,
+            prompt_scroll: 0,
             generating_name: false,
             focused_field: PaneCreateField::BranchName,
             error_msg: None,
+            launch_mode: LaunchMode::Single,
+            agent_checks: vec![],
+            agent_labels: vec![],
         }
     }
 }
@@ -1472,12 +1493,22 @@ impl App {
 
         // Open pane create dialog (configurable, default Ctrl+N)
         if self.key_matches(key, &self.config.keybindings.pane_create) {
+            let agent_labels: Vec<String> = self
+                .config
+                .multi_ai
+                .agents
+                .iter()
+                .map(|a| format!("{} ({})", a.name, a.command))
+                .collect();
+            let agent_checks = vec![false; self.config.multi_ai.agents.len()];
             self.pane_create_dialog = PaneCreateDialog {
                 visible: true,
                 worktree_enabled: self.config.worktree.auto_create,
                 agent: self.config.startup.default_agent.clone(),
                 focused_field: PaneCreateField::BranchName,
                 base_branch: self.config.worktree.base_branch.clone(),
+                agent_checks,
+                agent_labels,
                 ..Default::default()
             };
             self.dirty = true;
@@ -2474,36 +2505,96 @@ impl App {
                 self.dirty = true;
             }
             KeyCode::Tab => {
-                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field
-                {
-                    PaneCreateField::BranchName => PaneCreateField::BaseBranch,
-                    PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
-                    PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
-                    PaneCreateField::AgentField => PaneCreateField::PromptField,
-                    PaneCreateField::PromptField => PaneCreateField::AiGenerate,
-                    PaneCreateField::AiGenerate => PaneCreateField::OkButton,
-                    PaneCreateField::OkButton => PaneCreateField::CancelButton,
-                    PaneCreateField::CancelButton => PaneCreateField::BranchName,
+                let n_agents = self.pane_create_dialog.agent_checks.len();
+                let in_multi = self.pane_create_dialog.launch_mode == LaunchMode::Multi;
+                self.pane_create_dialog.focused_field = if in_multi {
+                    match &self.pane_create_dialog.focused_field {
+                        PaneCreateField::LaunchModeToggle => PaneCreateField::PromptField,
+                        PaneCreateField::PromptField => {
+                            if n_agents > 0 {
+                                PaneCreateField::MultiCheck(0)
+                            } else {
+                                PaneCreateField::OkButton
+                            }
+                        }
+                        PaneCreateField::MultiCheck(i) => {
+                            if *i + 1 < n_agents {
+                                PaneCreateField::MultiCheck(*i + 1)
+                            } else {
+                                PaneCreateField::OkButton
+                            }
+                        }
+                        PaneCreateField::OkButton => PaneCreateField::CancelButton,
+                        PaneCreateField::CancelButton => PaneCreateField::LaunchModeToggle,
+                        _ => PaneCreateField::LaunchModeToggle,
+                    }
+                } else {
+                    match &self.pane_create_dialog.focused_field {
+                        PaneCreateField::LaunchModeToggle => PaneCreateField::BranchName,
+                        PaneCreateField::BranchName => PaneCreateField::BaseBranch,
+                        PaneCreateField::BaseBranch => PaneCreateField::WorktreeToggle,
+                        PaneCreateField::WorktreeToggle => PaneCreateField::AgentField,
+                        PaneCreateField::AgentField => PaneCreateField::PromptField,
+                        PaneCreateField::PromptField => PaneCreateField::AiGenerate,
+                        PaneCreateField::AiGenerate => PaneCreateField::OkButton,
+                        PaneCreateField::OkButton => PaneCreateField::CancelButton,
+                        PaneCreateField::CancelButton => PaneCreateField::LaunchModeToggle,
+                        _ => PaneCreateField::LaunchModeToggle,
+                    }
                 };
                 self.dirty = true;
             }
             KeyCode::BackTab => {
-                self.pane_create_dialog.focused_field = match self.pane_create_dialog.focused_field
-                {
-                    PaneCreateField::BranchName => PaneCreateField::CancelButton,
-                    PaneCreateField::BaseBranch => PaneCreateField::BranchName,
-                    PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
-                    PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
-                    PaneCreateField::PromptField => PaneCreateField::AgentField,
-                    PaneCreateField::AiGenerate => PaneCreateField::PromptField,
-                    PaneCreateField::OkButton => PaneCreateField::AiGenerate,
-                    PaneCreateField::CancelButton => PaneCreateField::OkButton,
+                let n_agents = self.pane_create_dialog.agent_checks.len();
+                let in_multi = self.pane_create_dialog.launch_mode == LaunchMode::Multi;
+                self.pane_create_dialog.focused_field = if in_multi {
+                    match &self.pane_create_dialog.focused_field {
+                        PaneCreateField::LaunchModeToggle => PaneCreateField::CancelButton,
+                        PaneCreateField::PromptField => PaneCreateField::LaunchModeToggle,
+                        PaneCreateField::MultiCheck(i) => {
+                            if *i == 0 {
+                                PaneCreateField::PromptField
+                            } else {
+                                PaneCreateField::MultiCheck(*i - 1)
+                            }
+                        }
+                        PaneCreateField::OkButton => {
+                            if n_agents > 0 {
+                                PaneCreateField::MultiCheck(n_agents - 1)
+                            } else {
+                                PaneCreateField::PromptField
+                            }
+                        }
+                        PaneCreateField::CancelButton => PaneCreateField::OkButton,
+                        _ => PaneCreateField::LaunchModeToggle,
+                    }
+                } else {
+                    match &self.pane_create_dialog.focused_field {
+                        PaneCreateField::LaunchModeToggle => PaneCreateField::CancelButton,
+                        PaneCreateField::BranchName => PaneCreateField::LaunchModeToggle,
+                        PaneCreateField::BaseBranch => PaneCreateField::BranchName,
+                        PaneCreateField::WorktreeToggle => PaneCreateField::BaseBranch,
+                        PaneCreateField::AgentField => PaneCreateField::WorktreeToggle,
+                        PaneCreateField::PromptField => PaneCreateField::AgentField,
+                        PaneCreateField::AiGenerate => PaneCreateField::PromptField,
+                        PaneCreateField::OkButton => PaneCreateField::AiGenerate,
+                        PaneCreateField::CancelButton => PaneCreateField::OkButton,
+                        _ => PaneCreateField::LaunchModeToggle,
+                    }
                 };
                 self.dirty = true;
+            }
+            // Alt+Enter: submit from any field (including PromptField)
+            KeyCode::Enter if key.modifiers == KeyModifiers::ALT => {
+                self.do_pane_create_submit()?;
             }
             KeyCode::Enter => {
                 let field = self.pane_create_dialog.focused_field.clone();
                 match field {
+                    // PromptField: plain Enter inserts a newline
+                    PaneCreateField::PromptField => {
+                        self.prompt_insert("\n");
+                    }
                     PaneCreateField::CancelButton => {
                         self.pane_create_dialog.visible = false;
                         self.dirty = true;
@@ -2518,44 +2609,19 @@ impl App {
                             self.start_branch_name_generation();
                         }
                     }
+                    PaneCreateField::LaunchModeToggle => {
+                        self.toggle_launch_mode();
+                    }
+                    PaneCreateField::MultiCheck(i) => {
+                        if let Some(checked) = self.pane_create_dialog.agent_checks.get_mut(i) {
+                            *checked = !*checked;
+                        }
+                        self.dirty = true;
+                    }
                     PaneCreateField::OkButton
                     | PaneCreateField::BranchName
-                    | PaneCreateField::BaseBranch
-                    | PaneCreateField::PromptField => {
-                        if !self.pane_create_dialog.generating_name {
-                            let branch = self.pane_create_dialog.branch_name.clone();
-                            let worktree = self.pane_create_dialog.worktree_enabled;
-                            let agent = self.pane_create_dialog.agent.clone();
-                            let base_branch = self.pane_create_dialog.base_branch.clone();
-                            let prompt = self.pane_create_dialog.prompt.clone();
-                            let effective_agent = if !prompt.is_empty()
-                                && agent
-                                    .split_whitespace()
-                                    .next()
-                                    .map(|t| t.to_lowercase())
-                                    .as_deref()
-                                    == Some("claude")
-                            {
-                                let sanitized = Self::sanitize_prompt(&prompt);
-                                if sanitized.len() > 8192 {
-                                    self.pane_create_dialog.error_msg =
-                                        Some("Prompt too long (max 8192 bytes)".into());
-                                    self.dirty = true;
-                                    return Ok(true);
-                                }
-                                format!("{} {}", agent, Self::shell_quote_prompt(&sanitized))
-                            } else {
-                                agent
-                            };
-                            self.pane_create_dialog.visible = false;
-                            self.create_pane_from_dialog(
-                                branch,
-                                worktree,
-                                effective_agent,
-                                base_branch,
-                            )?;
-                            self.dirty = true;
-                        }
+                    | PaneCreateField::BaseBranch => {
+                        self.do_pane_create_submit()?;
                     }
                     _ => {}
                 }
@@ -2574,11 +2640,57 @@ impl App {
                     self.dirty = true;
                 }
                 PaneCreateField::PromptField => {
-                    self.pane_create_dialog.prompt.pop();
-                    self.dirty = true;
+                    self.prompt_backspace();
                 }
                 _ => {}
             },
+            KeyCode::Delete
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                self.prompt_delete_forward();
+            }
+            KeyCode::Left
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                self.prompt_move_left();
+            }
+            KeyCode::Right
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                self.prompt_move_right();
+            }
+            KeyCode::Up
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                // col_width matches render: inner_width - 2 (padding) - 10 ("Prompt: [" + "]")
+                // We use a fixed conservative width here; render will correct scroll anyway.
+                self.prompt_move_up(58);
+            }
+            KeyCode::Down
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                self.prompt_move_down(58);
+            }
+            KeyCode::Home
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                // Move to start of current logical line
+                let pos = self.pane_create_dialog.prompt_cursor;
+                let s = &self.pane_create_dialog.prompt;
+                let line_start = s[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                self.pane_create_dialog.prompt_cursor = line_start;
+                self.dirty = true;
+            }
+            KeyCode::End
+                if self.pane_create_dialog.focused_field == PaneCreateField::PromptField =>
+            {
+                // Move to end of current logical line
+                let pos = self.pane_create_dialog.prompt_cursor;
+                let s = &self.pane_create_dialog.prompt;
+                let line_end = s[pos..].find('\n').map(|i| pos + i).unwrap_or(s.len());
+                self.pane_create_dialog.prompt_cursor = line_end;
+                self.dirty = true;
+            }
             KeyCode::Char(c) => {
                 match self.pane_create_dialog.focused_field {
                     PaneCreateField::BranchName => {
@@ -2595,21 +2707,30 @@ impl App {
                         }
                     }
                     PaneCreateField::AgentField => {
-                        // Allow printable ASCII for agent command (except newline/null)
                         if c.is_ascii_graphic() || c == ' ' {
                             self.pane_create_dialog.agent.push(c);
                             self.dirty = true;
                         }
                     }
                     PaneCreateField::PromptField => {
-                        if c.is_ascii_graphic() || c == ' ' {
-                            self.pane_create_dialog.prompt.push(c);
-                            self.dirty = true;
+                        if !c.is_control() {
+                            let mut buf = [0u8; 4];
+                            let s = c.encode_utf8(&mut buf);
+                            self.prompt_insert(s);
                         }
                     }
                     PaneCreateField::WorktreeToggle if c == ' ' => {
                         self.pane_create_dialog.worktree_enabled =
                             !self.pane_create_dialog.worktree_enabled;
+                        self.dirty = true;
+                    }
+                    PaneCreateField::LaunchModeToggle if c == ' ' => {
+                        self.toggle_launch_mode();
+                    }
+                    PaneCreateField::MultiCheck(i) if c == ' ' => {
+                        if let Some(checked) = self.pane_create_dialog.agent_checks.get_mut(i) {
+                            *checked = !*checked;
+                        }
                         self.dirty = true;
                     }
                     _ => {}
@@ -2620,18 +2741,358 @@ impl App {
         Ok(true)
     }
 
+    fn toggle_launch_mode(&mut self) {
+        self.pane_create_dialog.launch_mode = match self.pane_create_dialog.launch_mode {
+            LaunchMode::Single => {
+                self.pane_create_dialog.focused_field = PaneCreateField::PromptField;
+                LaunchMode::Multi
+            }
+            LaunchMode::Multi => {
+                self.pane_create_dialog.focused_field = PaneCreateField::BranchName;
+                LaunchMode::Single
+            }
+        };
+        self.pane_create_dialog.error_msg = None;
+        self.dirty = true;
+    }
+
+    fn do_pane_create_submit(&mut self) -> Result<()> {
+        if self.pane_create_dialog.generating_name {
+            return Ok(());
+        }
+        if self.pane_create_dialog.launch_mode == LaunchMode::Multi {
+            self.create_multi_ai_panes()?;
+            if self.pane_create_dialog.error_msg.is_none() {
+                self.pane_create_dialog.visible = false;
+            }
+            self.dirty = true;
+            return Ok(());
+        }
+        let branch = self.pane_create_dialog.branch_name.clone();
+        let worktree = self.pane_create_dialog.worktree_enabled;
+        let agent = self.pane_create_dialog.agent.clone();
+        let base_branch = self.pane_create_dialog.base_branch.clone();
+        let prompt = self.pane_create_dialog.prompt.clone();
+        let effective_agent = if !prompt.is_empty() {
+            // Single-mode submit treats the prompt like an Arg-style payload (claude-style).
+            // Length is checked on the sanitized prompt to match what would actually be sent.
+            if Self::sanitize_prompt(&prompt).len() > 8192 {
+                self.pane_create_dialog.error_msg =
+                    Some("Prompt too long (max 8192 bytes)".into());
+                self.dirty = true;
+                return Ok(());
+            }
+            Self::format_agent_command(&agent, &prompt, &crate::config::PromptMode::Arg)
+        } else {
+            agent
+        };
+        self.pane_create_dialog.visible = false;
+        self.create_pane_from_dialog(branch, worktree, effective_agent, base_branch)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn format_agent_command(
+        base_cmd: &str,
+        prompt: &str,
+        mode: &crate::config::PromptMode,
+    ) -> String {
+        use crate::config::PromptMode;
+        if prompt.is_empty() {
+            return base_cmd.to_string();
+        }
+        let sanitized = Self::sanitize_prompt(prompt);
+        if sanitized.is_empty() {
+            return base_cmd.to_string();
+        }
+        match mode {
+            PromptMode::Arg => format!("{} {}", base_cmd, Self::shell_quote_prompt(&sanitized)),
+            PromptMode::Flag(flag) => {
+                format!("{} {} {}", base_cmd, flag, Self::shell_quote_prompt(&sanitized))
+            }
+            PromptMode::Stdin | PromptMode::None => base_cmd.to_string(),
+        }
+    }
+
+    fn create_multi_ai_panes(&mut self) -> Result<()> {
+        let n_agents = self.config.multi_ai.agents.len();
+        debug_assert_eq!(self.pane_create_dialog.agent_checks.len(), n_agents);
+
+        let selected_indices: Vec<usize> = self
+            .pane_create_dialog
+            .agent_checks
+            .iter()
+            .enumerate()
+            .filter(|(_, &checked)| checked)
+            .map(|(i, _)| i)
+            .collect();
+
+        if selected_indices.is_empty() {
+            self.pane_create_dialog.error_msg = Some("Select at least one AI".into());
+            return Ok(());
+        }
+
+        // Grid layout in build_layout_node only meaningfully handles up to 4 panes.
+        let selected_indices: Vec<usize> = selected_indices.into_iter().take(4).collect();
+        let n = selected_indices.len();
+
+        let prompt = self.pane_create_dialog.prompt.clone();
+        if !prompt.is_empty() && Self::sanitize_prompt(&prompt).len() > 8192 {
+            self.pane_create_dialog.error_msg = Some("Prompt too long (max 8192 bytes)".into());
+            return Ok(());
+        }
+
+        let (cols, rows) = self.last_term_size;
+        let pane_rows = rows.saturating_sub(5);
+        let pane_cols = cols.saturating_sub(2);
+
+        let pre_call_next_id = self.next_pane_id;
+        let focused_id = self.ws().focused_pane_id;
+        let mut all_ids: Vec<usize> = vec![focused_id];
+        let mut created_ids: Vec<usize> = vec![];
+
+        for _ in 1..n {
+            let new_id = self.next_pane_id;
+            self.next_pane_id = self.next_pane_id.wrapping_add(1);
+            match crate::pane::Pane::new(new_id, pane_rows, pane_cols, self.event_tx.clone()) {
+                Ok(pane) => {
+                    self.ws_mut().panes.insert(new_id, pane);
+                    created_ids.push(new_id);
+                    all_ids.push(new_id);
+                }
+                Err(e) => {
+                    for &pid in &created_ids {
+                        if let Some(mut p) = self.ws_mut().panes.remove(&pid) {
+                            p.kill();
+                        }
+                    }
+                    self.next_pane_id = pre_call_next_id;
+                    return Err(e);
+                }
+            }
+        }
+
+        if let Some(new_layout) = Self::build_layout_node(LayoutMode::Grid, &all_ids) {
+            self.ws_mut().layout = new_layout;
+        }
+
+        let agents: Vec<crate::config::MultiAiAgent> = selected_indices
+            .iter()
+            .map(|&i| self.config.multi_ai.agents[i].clone())
+            .collect();
+
+        for (pane_id, agent) in all_ids.iter().zip(agents.iter()) {
+            let cmd = Self::format_agent_command(&agent.command, &prompt, &agent.prompt_mode);
+            let cmd_line = format!("{}\n", cmd);
+            if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
+                let _ = pane.write_input(cmd_line.as_bytes());
+            }
+            // Stdin agents read the prompt from their own stdin, so push the
+            // sanitized prompt right after the launch command.
+            if matches!(agent.prompt_mode, crate::config::PromptMode::Stdin) && !prompt.is_empty() {
+                let sanitized = Self::sanitize_prompt(&prompt);
+                if !sanitized.is_empty() {
+                    let prompt_line = format!("{}\n", sanitized);
+                    if let Some(pane) = self.ws_mut().panes.get_mut(pane_id) {
+                        let _ = pane.write_input(prompt_line.as_bytes());
+                    }
+                }
+            }
+        }
+
+        self.ws_mut().focused_pane_id = all_ids[0];
+        self.mark_layout_change();
+        Ok(())
+    }
+
+    /// Insert `text` at the prompt cursor, then advance cursor.
+    fn prompt_insert(&mut self, text: &str) {
+        let pos = self.pane_create_dialog.prompt_cursor;
+        self.pane_create_dialog.prompt.insert_str(pos, text);
+        self.pane_create_dialog.prompt_cursor += text.len();
+        self.dirty = true;
+    }
+
+    /// Delete the character before the cursor (Backspace).
+    fn prompt_backspace(&mut self) {
+        let pos = self.pane_create_dialog.prompt_cursor;
+        if pos == 0 {
+            return;
+        }
+        // Find the char boundary just before pos
+        let s = &self.pane_create_dialog.prompt;
+        let prev = s[..pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.pane_create_dialog.prompt.remove(prev);
+        self.pane_create_dialog.prompt_cursor = prev;
+        self.dirty = true;
+    }
+
+    /// Delete the character at (after) the cursor (Delete key).
+    fn prompt_delete_forward(&mut self) {
+        let pos = self.pane_create_dialog.prompt_cursor;
+        let len = self.pane_create_dialog.prompt.len();
+        if pos >= len {
+            return;
+        }
+        self.pane_create_dialog.prompt.remove(pos);
+        self.dirty = true;
+    }
+
+    /// Move cursor one char to the left.
+    fn prompt_move_left(&mut self) {
+        let pos = self.pane_create_dialog.prompt_cursor;
+        if pos == 0 {
+            return;
+        }
+        let s = &self.pane_create_dialog.prompt;
+        let prev = s[..pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.pane_create_dialog.prompt_cursor = prev;
+        self.dirty = true;
+    }
+
+    /// Move cursor one char to the right.
+    fn prompt_move_right(&mut self) {
+        let pos = self.pane_create_dialog.prompt_cursor;
+        let s = &self.pane_create_dialog.prompt;
+        if pos >= s.len() {
+            return;
+        }
+        let next = s[pos..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| pos + i)
+            .unwrap_or(s.len());
+        self.pane_create_dialog.prompt_cursor = next;
+        self.dirty = true;
+    }
+
+    /// Move cursor up one visual row (given visible column width).
+    fn prompt_move_up(&mut self, col_width: usize) {
+        if col_width == 0 {
+            return;
+        }
+        let pos = self.pane_create_dialog.prompt_cursor;
+        let s = &self.pane_create_dialog.prompt;
+        // Compute (logical_line, col) of cursor
+        let (line_idx, col) = Self::prompt_line_col(s, pos, col_width);
+        if line_idx == 0 {
+            self.pane_create_dialog.prompt_cursor = 0;
+            self.dirty = true;
+            return;
+        }
+        let lines = Self::prompt_wrap_lines(s, col_width);
+        let target_line = line_idx - 1;
+        let target_col = col.min(lines[target_line].1);
+        self.pane_create_dialog.prompt_cursor =
+            Self::prompt_offset_of(s, &lines, target_line, target_col);
+        self.dirty = true;
+    }
+
+    /// Move cursor down one visual row.
+    fn prompt_move_down(&mut self, col_width: usize) {
+        if col_width == 0 {
+            return;
+        }
+        let pos = self.pane_create_dialog.prompt_cursor;
+        let s = &self.pane_create_dialog.prompt;
+        let (line_idx, col) = Self::prompt_line_col(s, pos, col_width);
+        let lines = Self::prompt_wrap_lines(s, col_width);
+        if line_idx + 1 >= lines.len() {
+            self.pane_create_dialog.prompt_cursor = s.len();
+            self.dirty = true;
+            return;
+        }
+        let target_line = line_idx + 1;
+        let target_col = col.min(lines[target_line].1);
+        self.pane_create_dialog.prompt_cursor =
+            Self::prompt_offset_of(s, &lines, target_line, target_col);
+        self.dirty = true;
+    }
+
+    /// Wrap `s` into visual rows of `width` chars, respecting '\n'.
+    /// Returns a vec of (byte_start, char_len) per row.
+    fn prompt_wrap_lines(s: &str, width: usize) -> Vec<(usize, usize)> {
+        let mut rows: Vec<(usize, usize)> = Vec::new();
+        let mut byte_pos = 0usize;
+        for logical_line in s.split('\n') {
+            let chars: Vec<(usize, char)> = logical_line.char_indices().collect();
+            if chars.is_empty() {
+                rows.push((byte_pos, 0));
+                byte_pos += 1; // '\n'
+                continue;
+            }
+            let mut start_char = 0usize;
+            loop {
+                let end_char = (start_char + width).min(chars.len());
+                let row_byte_start = byte_pos
+                    + if start_char < chars.len() {
+                        chars[start_char].0
+                    } else {
+                        logical_line.len()
+                    };
+                let char_len = end_char - start_char;
+                rows.push((row_byte_start, char_len));
+                start_char = end_char;
+                if start_char >= chars.len() {
+                    break;
+                }
+            }
+            // advance past the logical line and its '\n'
+            byte_pos += logical_line.len();
+            if byte_pos < s.len() {
+                byte_pos += 1; // '\n'
+            }
+        }
+        if rows.is_empty() {
+            rows.push((0, 0));
+        }
+        rows
+    }
+
+    /// Return (row_index, col_in_row) for the given byte offset.
+    fn prompt_line_col(s: &str, byte_pos: usize, width: usize) -> (usize, usize) {
+        let rows = Self::prompt_wrap_lines(s, width);
+        for (i, &(start, char_len)) in rows.iter().enumerate() {
+            let end_byte = if i + 1 < rows.len() {
+                rows[i + 1].0
+            } else {
+                s.len() + 1
+            };
+            if byte_pos >= start && byte_pos < end_byte.min(s.len() + 1) {
+                let col = s[start..byte_pos].chars().count().min(char_len);
+                return (i, col);
+            }
+        }
+        let last = rows.len().saturating_sub(1);
+        (last, rows.last().map(|r| r.1).unwrap_or(0))
+    }
+
+    /// Compute byte offset for a given (row, col) pair.
+    fn prompt_offset_of(s: &str, rows: &[(usize, usize)], row: usize, col: usize) -> usize {
+        if row >= rows.len() {
+            return s.len();
+        }
+        let (start, char_len) = rows[row];
+        let clamped_col = col.min(char_len);
+        let byte_offset: usize = s[start..]
+            .char_indices()
+            .nth(clamped_col)
+            .map(|(i, _)| i)
+            .unwrap_or(s[start..].len());
+        start + byte_offset
+    }
+
     fn sanitize_prompt(s: &str) -> String {
         s.chars()
-            .map(|c| {
-                if c == '\n' || c == '\r' {
-                    ' '
-                } else if (c as u32) < 0x20 || c == '\x7f' {
-                    '\0'
-                } else {
-                    c
-                }
-            })
-            .filter(|&c| c != '\0')
+            .filter(|&c| c == '\n' || (!c.is_control() && c != '\x7f'))
             .collect()
     }
 
@@ -4225,6 +4686,54 @@ impl App {
         Ok(())
     }
 
+    /// Returns true if the paste was consumed by a dialog (not forwarded to PTY).
+    pub fn handle_paste_in_dialog(&mut self, text: &str) -> bool {
+        if self.pane_create_dialog.visible {
+            match self.pane_create_dialog.focused_field {
+                PaneCreateField::PromptField => {
+                    // Allow newlines in pasted text; strip other control chars.
+                    let filtered: String = text
+                        .chars()
+                        .filter(|&c| c == '\n' || !c.is_control())
+                        .collect();
+                    self.prompt_insert(&filtered);
+                }
+                PaneCreateField::BranchName => {
+                    for c in text.chars() {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
+                            self.pane_create_dialog.branch_name.push(c);
+                        }
+                    }
+                    self.dirty = true;
+                }
+                PaneCreateField::BaseBranch => {
+                    for c in text.chars() {
+                        if c.is_ascii_alphanumeric()
+                            || c == '-'
+                            || c == '/'
+                            || c == '_'
+                            || c == '.'
+                        {
+                            self.pane_create_dialog.base_branch.push(c);
+                        }
+                    }
+                    self.dirty = true;
+                }
+                PaneCreateField::AgentField => {
+                    for c in text.chars() {
+                        if c.is_ascii_graphic() || c == ' ' {
+                            self.pane_create_dialog.agent.push(c);
+                        }
+                    }
+                    self.dirty = true;
+                }
+                _ => {}
+            }
+            return true;
+        }
+        false
+    }
+
     #[allow(dead_code)]
     pub fn forward_key_to_pty(&mut self, key: KeyEvent) -> Result<()> {
         let focused_id = self.ws().focused_pane_id;
@@ -5202,5 +5711,136 @@ mod tests {
         // Non-handled keys return false.
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(!edit_key_buffer(&mut buf, enter, 32));
+    }
+
+    #[test]
+    fn test_format_cmd_arg() {
+        let result = App::format_agent_command(
+            "claude",
+            "hello world",
+            &crate::config::PromptMode::Arg,
+        );
+        assert_eq!(result, "claude 'hello world'");
+    }
+
+    #[test]
+    fn test_format_cmd_flag() {
+        let result = App::format_agent_command(
+            "gemini",
+            "hello world",
+            &crate::config::PromptMode::Flag("-p".into()),
+        );
+        assert_eq!(result, "gemini -p 'hello world'");
+    }
+
+    #[test]
+    fn test_format_cmd_stdin() {
+        let result =
+            App::format_agent_command("codex", "hello", &crate::config::PromptMode::Stdin);
+        assert_eq!(result, "codex");
+    }
+
+    #[test]
+    fn test_format_cmd_none() {
+        let result =
+            App::format_agent_command("foo", "hello", &crate::config::PromptMode::None);
+        assert_eq!(result, "foo");
+    }
+
+    #[test]
+    fn test_format_cmd_empty_prompt() {
+        let result =
+            App::format_agent_command("claude", "", &crate::config::PromptMode::Arg);
+        assert_eq!(result, "claude");
+    }
+
+    /// Minimal POSIX sh single-quote unquoter: accepts a string composed of
+    /// '...' segments and \' escape characters, returns the literal content.
+    /// Returns None on malformed input.
+    fn posix_unquote(s: &str) -> Option<String> {
+        let mut out = String::new();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        let mut in_quote = false;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_quote {
+                if b == b'\'' {
+                    in_quote = false;
+                    i += 1;
+                } else {
+                    out.push(b as char);
+                    i += 1;
+                }
+            } else {
+                match b {
+                    b'\'' => {
+                        in_quote = true;
+                        i += 1;
+                    }
+                    b'\\' if i + 1 < bytes.len() => {
+                        out.push(bytes[i + 1] as char);
+                        i += 2;
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        if in_quote {
+            return None;
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn test_format_cmd_injection() {
+        let result = App::format_agent_command(
+            "claude",
+            "'; rm -rf / #",
+            &crate::config::PromptMode::Arg,
+        );
+        assert!(result.starts_with("claude "), "result: {result}");
+        let arg = &result["claude ".len()..];
+        // The argument must round-trip through POSIX shell single-quote
+        // semantics back to the original prompt; this rejects any escape
+        // that would let "; rm" run as a separate command.
+        let parsed = posix_unquote(arg).expect("should be parseable");
+        assert_eq!(parsed, "'; rm -rf / #", "not round-trip safe: {result}");
+    }
+
+    #[test]
+    fn test_grid_layout_n2() {
+        let node = App::build_layout_node(LayoutMode::Grid, &[1, 2]);
+        assert!(node.is_some());
+        let ids = node.unwrap().collect_pane_ids();
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_grid_layout_n3() {
+        let node = App::build_layout_node(LayoutMode::Grid, &[1, 2, 3]);
+        assert!(node.is_some());
+        let ids = node.unwrap().collect_pane_ids();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn test_grid_layout_n4() {
+        let node = App::build_layout_node(LayoutMode::Grid, &[1, 2, 3, 4]);
+        assert!(node.is_some());
+        let ids = node.unwrap().collect_pane_ids();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn test_multi_zero_selection() {
+        let checks: Vec<bool> = vec![false, false, false, false];
+        let selected: Vec<usize> = checks
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(selected.is_empty());
     }
 }
