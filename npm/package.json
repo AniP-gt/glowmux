@@ -3,7 +3,8 @@
   "version": "0.6.1",
   "description": "Claude Code Multiplexer — manage multiple Claude Code instances in TUI split panes",
   "bin": {
-    "glowmux": "bin/cli.js"
+    "glowmux": "bin/cli.js",
+    "gmux": "bin/cli.js"
   },
   "scripts": {
     "postinstall": "node scripts/install.js"

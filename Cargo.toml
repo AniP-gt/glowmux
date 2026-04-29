@@ -8,6 +8,10 @@ description = "Glow Multiplexer — manage multiple Claude Code instances in TUI
 name = "glowmux"
 path = "src/main.rs"
 
+[[bin]]
+name = "gmux"
+path = "src/main.rs"
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"
