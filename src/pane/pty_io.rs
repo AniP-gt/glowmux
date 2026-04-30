@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
@@ -36,6 +36,14 @@ pub(crate) fn pty_reader_thread(
                     if let Ok(mut t) = title.lock() {
                         *t = new_title;
                     }
+                }
+
+                // Pass OSC 1337 SetUserVar through to the parent terminal (e.g. WezTerm)
+                // so that plugins like cc-glow can receive user variable change events.
+                if let Some(osc) = extract_osc1337_setuservar(data) {
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(osc.as_bytes());
+                    let _ = stdout.flush();
                 }
 
                 let lines = extract_printable_lines(data);
@@ -142,6 +150,23 @@ pub(crate) fn extract_osc7(data: &[u8]) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Extract an OSC 1337 SetUserVar sequence from PTY output and return it verbatim
+/// so glowmux can forward it to the parent terminal (e.g. WezTerm).
+pub(crate) fn extract_osc1337_setuservar(data: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(data).ok()?;
+    let marker = "\x1b]1337;SetUserVar=";
+    let start = s.find(marker)?;
+    let rest = &s[start + marker.len()..];
+    let end = rest.find('\x07').or_else(|| rest.find("\x1b\\"))?;
+    let payload = &rest[..end];
+    // Only forward AI_RING to avoid leaking unrelated user vars
+    if !payload.starts_with("AI_RING=") {
+        return None;
+    }
+    let terminator = if rest[end..].starts_with('\x07') { "\x07" } else { "\x1b\\" };
+    Some(format!("{}{}{}", marker, payload, terminator))
 }
 
 pub(crate) fn extract_osc_title(data: &[u8]) -> Option<String> {
