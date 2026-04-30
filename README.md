@@ -1,6 +1,6 @@
 # glowmux
 
-Manage multiple Claude Code or shell sessions in one Rust TUI.
+Manage multiple Claude Code and other AI CLI sessions in one Rust TUI.
 
 Forked from and heavily inspired by [ccmux](https://github.com/Shin-sibainu/ccmux).
 
@@ -9,16 +9,21 @@ Forked from and heavily inspired by [ccmux](https://github.com/Shin-sibainu/ccmu
 
 - Split one terminal into multiple PTY panes
 - Keep separate tab workspaces
+- Launch multiple AI agents in parallel (Claude, Gemini, Codex, opencode, or any CLI)
 - Show a file tree for the active workspace directory
 - Preview text files, images, and git diffs
 - Track pane working directories through OSC 7 updates
-- Can save and restore session snapshots in the config directory when session support is enabled
+- Manage git worktrees per pane
+- Save and restore session snapshots
+
 
 ## Build and run
 
 ```bash
-cargo build --release
-cargo run
+cargo build          # Debug build
+cargo build --release # Release build
+cargo test           # Run tests
+cargo run            # Run the app
 ```
 
 You can also start in a specific directory:
@@ -29,18 +34,89 @@ glowmux /path/to/project
 
 Nested glowmux sessions are blocked. If `GLOWMUX` is already set, the app exits instead of starting inside an existing pane.
 
+
+## Multi-AI agent launch
+
+The pane creation dialog (Ctrl+N) lets you select one or more AI agents and launch them in parallel panes with an optional shared prompt.
+
+Agents are configured in config.toml via `[[multi_ai.agents]]`. Each agent needs `name`, `command`, and `prompt_mode`:
+
+```toml
+[[multi_ai.agents]]
+name = "claude"
+command = "claude"
+prompt_mode = "arg"
+
+[[multi_ai.agents]]
+name = "gemini"
+command = "gemini"
+prompt_mode = {flag = "-i"}
+
+[[multi_ai.agents]]
+name = "opencode"
+command = "opencode run"
+prompt_mode = "arg"
+
+[[multi_ai.agents]]
+name = "codex"
+command = "codex"
+prompt_mode = "arg"
+```
+
+The `prompt_mode` field accepts:
+
+- `"arg"` — prompt appended as a command-line argument
+- `{flag = "-i"}` — prompt passed after the specified flag
+- `"stdin"` — prompt written to stdin
+- `"none"` — command launched without a prompt
+
+Commands are validated before launch. Flags must start with `-` and cannot contain shell metacharacters.
+
+
+## Git worktree support
+
+glowmux can create and manage git worktrees per pane. When `features.worktree = true`, the pane creation dialog includes an option to create a new worktree. When `features.worktree_ai_name = true`, glowmux calls the configured AI provider to suggest a branch name.
+
+Configure via `[worktree]`:
+
+- `base_dir` — where worktrees are created (default: `~/worktrees`)
+- `auto_branch = true` — auto-generate branch name
+- `branch_prefix = "feat/"` — branch name prefix
+- `close_worktree = "ask"` — what to do when a pane closes: `ask`, `keep`, or `delete`
+- `close_confirm = false` — show confirmation dialog before close
+- `main_branch = "main"` — base branch for new worktrees
+- `prefer_gwq = false` — use gwq CLI instead of git worktree
+- `gwq_basedir = "~/ghq"` — gwq base directory
+- `base_branch = "main"` — branch to base new worktrees on
+- `auto_create = false` — create a worktree automatically when creating a new pane
+
+
+## AI title generation
+
+When `features.ai_title = true`, glowmux periodically samples pane output and asks the configured AI backend to generate a short title. Toggle at runtime with `Alt+A`.
+
+The `[ai_title_engine]` section configures this separately from the main AI provider:
+
+- `backend` — `"ollama"`, `"gemini"`, or `"claude-headless"` (default: `"claude-headless"`)
+- `model` — overrides the provider's default model
+- `max_chars = 20` — maximum title length
+- `timeout_sec = 5` — request timeout
+- `update_interval_sec = 30` — how often to regenerate
+
+
 ## Configuration
 
 glowmux loads its runtime config from `dirs::config_dir()/glowmux/config.toml`.
+
 On common setups that usually resolves to:
 
 - Linux: `~/.config/glowmux/config.toml`
 - macOS: `~/Library/Application Support/glowmux/config.toml`
 - Windows: `%AppData%\glowmux\config.toml`
 
-Keys you omit fall back to the built-in defaults from `src/config.rs`.
+Keys you omit fall back to the built-in defaults from `src/config/mod.rs`.
 
-This repo also includes `setting.sample.toml`. Keep that filename in the repo, then copy it to your runtime path as `config.toml`.
+This repo includes `setting.sample.toml`. Keep that filename in the repo, then copy it to your runtime path as `config.toml`:
 
 ```bash
 # Linux example
@@ -49,6 +125,17 @@ cp setting.sample.toml ~/.config/glowmux/config.toml
 ```
 
 Session data is stored separately at `<config-dir>/glowmux/session.json`.
+
+### Important config notes
+
+- `ai.gemini.api_key` is read when glowmux loads the config, but app saves never write it back
+- `session.save_path` exists in the config schema, but the current runtime still saves and loads `<config-dir>/glowmux/session.json`
+- Session restore runs before startup panes. If restore succeeds, startup panes are skipped
+- Session saving currently happens on clean exit when `session.enabled = true`
+- `session.auto_save`, `session.save_interval`, and `session.restore_claude` exist in the schema but aren't wired into runtime behavior yet
+- The app can run with no config file at all. `config.toml` is only created when glowmux saves settings for you
+- See `setting.sample.toml` for the full commented template and defaults
+
 
 ## Claude Code hooks
 
@@ -145,19 +232,10 @@ The forwarder sends to the same runtime socket that glowmux opens:
 
 Windows is not covered by this helper yet because the current runtime uses a Unix socket.
 
-### Important config notes
-
-- `ai.gemini.api_key` is read when glowmux loads the config, but app saves never write it back
-- `session.save_path` exists in the config schema, but the current runtime still saves and loads `<config-dir>/glowmux/session.json`
-- Session restore runs before startup panes. If restore succeeds, startup panes are skipped
-- Session saving currently happens on clean exit when `session.enabled = true`
-- `session.auto_save`, `session.save_interval`, and `session.restore_claude` exist in the schema, but they are not currently wired into runtime behavior
-- The app can run with no config file at all. `config.toml` is only created when glowmux saves settings for you
-- See `setting.sample.toml` for the full commented template and defaults
 
 ## Keybindings
 
-Configurable defaults come from `KeybindingsConfig::default()` in `src/config.rs`. A few context-specific bindings such as `Alt+S`, `Alt+1..9`, and `Ctrl+Left` / `Ctrl+Right` are handled directly in the app.
+Configurable defaults come from `KeybindingsConfig::default()` in `src/config/mod.rs`. A few context-specific bindings such as `Alt+S`, `Alt+1..9`, and `Ctrl+Left` / `Ctrl+Right` are handled directly in the app.
 
 ### Pane focus keys
 
@@ -173,12 +251,15 @@ These defaults work while pane focus is active.
 | `Alt+Left` / `Alt+Right` | Previous / next tab |
 | `Alt+1`..`Alt+9` | Jump to tab |
 | `Alt+R` | Rename current tab |
+| `Alt+Shift+R` | Rename focused pane |
 | `Alt+H` / `Alt+J` / `Alt+K` / `Alt+L` | Move focus between panes by direction |
 | `Alt+[` / `Alt+]` | Previous / next pane |
+| `Alt+P` | Open the pane list sidebar |
 | `Ctrl+Left` / `Ctrl+Right` | Cycle focus across file tree, preview, and panes |
 | `Ctrl+F` | Toggle file tree or move focus to it |
 | `Ctrl+P` | Swap preview and pane columns |
 | `Ctrl+L` | Open layout picker when more than one pane exists |
+| `Ctrl+Space` | Cycle layout mode |
 | `Alt+Z` | Zoom the focused pane, or the preview when preview has focus |
 | `Ctrl+Y` | Copy visible content from the focused pane |
 | `Alt+A` | Toggle AI title generation |
@@ -222,12 +303,12 @@ Important file tree behavior:
 - Hidden files are shown by default
 - `.git` is always hidden
 - Directories expand and collapse lazily
-- The file tree follows the focused pane. If panes point at different subdirectories, repositories, or worktrees, the file tree and git badges rebind to that pane context.
-- Git badges are pane-scoped and use compact markers: `M` modified, `+` added, `-` deleted, `→` renamed, `?` untracked, `◌` ignored, `!` conflicted.
+- The file tree follows the focused pane. If panes point at different subdirectories, repositories, or worktrees, the file tree and git badges rebind to that pane context
+- Git badges are pane-scoped and use compact markers: `M` modified, `+` added, `-` deleted, `→` renamed, `?` untracked, `◌` ignored, `!` conflicted
 - `filetree.enter_action` decides what `Enter` does for files:
-  - `preview`: open preview and move focus to the preview
-  - `editor` or `neovim`: send the editor command to the focused pane shell
-  - `choose`: open a small action picker with preview or editor
+  - `preview` — open preview and move focus to the preview
+  - `editor` or `neovim` — send the editor command to the focused pane shell
+  - `choose` — open a small action picker with preview or editor
 - `filetree.editor` is the command name used by editor mode. The default is `nvim`
 
 ### Preview keys
@@ -260,31 +341,35 @@ These keys work when preview focus is active.
 - Scroll inside the file tree, preview, or pane history
 - Drag across pane or preview text to select it. Releasing the mouse copies the selection to the clipboard
 
+
 ## Runtime behavior that matters
 
 - The active workspace starts from your current directory, or from the directory passed on the command line
 - For bash and zsh, glowmux injects OSC 7 directory updates so `cd` changes can update the workspace state automatically
 - When the focused pane changes directory through OSC 7, glowmux updates the workspace cwd, rebuilds the file tree, updates the cwd-based tab name, and closes the preview
-- Manual tab rename is session-only. It changes the displayed label for that run, but it is not persisted
+- Manual tab rename is session-only. It changes the displayed label for that run but isn't persisted
+- Pane rename is also session-only and distinct from tab rename
 - Session restore takes priority over startup panes
-- Current session restore is limited. It recreates tabs, pane counts, and saved titles, but it does not fully restore pane cwd, saved layout mode, worktree metadata, or Claude relaunch state
+- Current session restore is limited. It recreates tabs, pane counts, and saved titles, but doesn't fully restore pane cwd, saved layout mode, worktree metadata, or Claude relaunch state
 - The file tree auto-refreshes while visible, so directory changes show up without reopening the app
-- `Ctrl+C` copies the current text selection if one exists. Otherwise it is forwarded to the focused PTY as usual
-- Closing a preview does not close the file tree
+- `Ctrl+C` copies the current text selection if one exists. Otherwise it's forwarded to the focused PTY as usual
+- Closing a preview doesn't close the file tree
 - Closing the file tree while it has focus moves focus to the preview if one is open, otherwise back to panes
+
 
 ## Preview limits and diff behavior
 
-Preview behavior comes from `src/preview.rs`.
+Preview behavior comes from `src/preview/mod.rs`.
 
 - Text preview reads up to 500 lines
 - Text files larger than 10 MB are rejected
 - Image files larger than 20 MB are rejected
-- Binary files are detected from the first 8192 bytes and are not rendered as text
+- Binary files are detected from the first 8192 bytes and aren't rendered as text
 - Image preview is attempted for common image extensions such as `png`, `jpg`, `gif`, `webp`, `bmp`, `ico`, and `tiff`
 - Diff preview runs pane-scoped `git diff HEAD -- <file>` for the selected file and shows the first 500 diff lines
 - If `[preview].prefer_delta = true` and `delta` is installed, glowmux prefers delta-styled diff output for the embedded preview and falls back to plain git diff automatically when delta is unavailable or unsuitable
-- If there is no diff, diff preview stays off and the app shows a status message
+- If there's no diff, diff preview stays off and the app shows a status message
+
 
 ## In-app settings and feature toggles
 
@@ -315,8 +400,9 @@ Preview behavior comes from `src/preview.rs`.
 - `startup_panes`
 - `zoom`
 
-Those dialogs save back to `config.toml`. Some of the saved booleans are active runtime toggles, while others are currently schema fields that are not enforced everywhere yet.
-Hotkeys like `Alt+A` change runtime state immediately, but they do not write the config file by themselves.
+Those dialogs save back to `config.toml`. Some of the saved booleans are active runtime toggles, while others are currently schema fields that aren't enforced everywhere yet.
+Hotkeys like `Alt+A` change runtime state immediately, but they don't write the config file by themselves.
+
 
 ## Configuration sections
 
@@ -334,27 +420,41 @@ The config file supports these top-level sections:
 - `[ai.ollama]`
 - `[ai.gemini]`
 - `[ai.claude_headless]`
+- `[ai_title_engine]`
 - `[status]`
 - `[worktree]`
 - `[session]`
 - `[keybindings]`
-- `[ai_title_engine]`
 - `[filetree]`
+- `[preview]`
+- `[[multi_ai.agents]]`
 
-Use `setting.sample.toml` as the schema reference. It mirrors the current config schema from `src/config.rs` and includes the shipped defaults, including a few fields that are not fully wired into runtime behavior yet.
+Use `setting.sample.toml` as the schema reference. It mirrors the current config schema from `src/config/mod.rs` and includes the shipped defaults, including a few fields that aren't fully wired into runtime behavior yet.
+
 
 ## Source map
 
 ```text
 src/
 ├── main.rs
-├── app.rs
-├── config.rs
-├── filetree.rs
-├── pane.rs
-├── preview.rs
-└── session.rs
+├── app/
+├── config/
+├── ai/
+├── ui/
+├── pane/
+├── filetree/
+├── preview/
+├── git_status/
+├── worktree/
+├── session/
+├── hooks/
+├── claude_monitor/
+├── keybinding/
+├── shell/
+├── version_check/
+└── core/
 ```
+
 
 ## License
 
