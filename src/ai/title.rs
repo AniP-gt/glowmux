@@ -1,4 +1,4 @@
-use crate::ai_invoke;
+use crate::ai::invoke;
 use crate::config::AiTitleEngineConfig;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,22 +101,22 @@ pub async fn generate_title(
 
     let result = match backend {
         AiTitleBackend::ClaudeHeadless => {
-            ai_invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model)
+            invoke::invoke_claude_headless_with_model(&prompt, config.timeout_sec, &config.model)
                 .await
         }
         AiTitleBackend::Ollama => {
-            ai_invoke::invoke_ollama(ollama_url, ollama_model, &prompt, config.timeout_sec).await
+            invoke::invoke_ollama(ollama_url, ollama_model, &prompt, config.timeout_sec).await
         }
         AiTitleBackend::Gemini => {
             if gemini_api_key.is_empty() {
-                ai_invoke::invoke_claude_headless_with_model(
+                invoke::invoke_claude_headless_with_model(
                     &prompt,
                     config.timeout_sec,
                     &config.model,
                 )
                 .await
             } else {
-                let result = ai_invoke::invoke_gemini(
+                let result = invoke::invoke_gemini(
                     gemini_api_key,
                     gemini_model,
                     &prompt,
@@ -126,7 +126,7 @@ pub async fn generate_title(
                 if result.is_some() {
                     result
                 } else {
-                    ai_invoke::invoke_claude_headless_with_model(
+                    invoke::invoke_claude_headless_with_model(
                         &prompt,
                         config.timeout_sec,
                         &config.model,

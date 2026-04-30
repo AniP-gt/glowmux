@@ -7,7 +7,7 @@ pub(crate) use anyhow::Result;
 pub(crate) use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 pub(crate) use ratatui::layout::Rect;
 
-pub(crate) use crate::ai_title;
+pub(crate) use crate::ai::title as ai_title;
 pub(crate) use crate::config::{ConfigFile, FeaturesConfig};
 pub(crate) use crate::filetree::FileTree;
 pub(crate) use crate::hooks::HookEvent;

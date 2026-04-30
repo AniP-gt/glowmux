@@ -317,7 +317,7 @@ pub async fn generate_branch_name(
 
     let raw = match config.provider.as_str() {
         "ollama" => {
-            crate::ai_invoke::invoke_ollama(
+            crate::ai::invoke::invoke_ollama(
                 &config.ollama.base_url,
                 &config.ollama.model,
                 &prompt,
@@ -325,7 +325,7 @@ pub async fn generate_branch_name(
             )
             .await
         }
-        _ => crate::ai_invoke::invoke_claude_headless(&prompt, 10).await,
+        _ => crate::ai::invoke::invoke_claude_headless(&prompt, 10).await,
     }?;
 
     let sanitized: String = raw
