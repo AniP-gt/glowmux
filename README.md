@@ -2,6 +2,8 @@
 
 Manage multiple Claude Code or shell sessions in one Rust TUI.
 
+Forked from and heavily inspired by [ccmux](https://github.com/Shin-sibainu/ccmux).
+
 
 ## What it does
 
