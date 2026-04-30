@@ -214,9 +214,9 @@ Add this to your Claude Code `settings.json` hooks section:
 Claude Code passes the hook payload as JSON on stdin.
 glowmux accepts either `event` or `hook_event_name`, along with `session_id` and `transcript_path` when Claude provides them.
 
-The `Notification` hook uses `matcher: "permission_prompt"` rather than an empty matcher.
-Using an empty matcher would fire on every internal notification Claude Code emits (tool results, sub-agent calls, etc.), causing constant `Waiting` state flicker in glowmux.
-Restricting to `permission_prompt` ensures glowmux only enters the yellow waiting state when Claude is actually blocked on user approval.
+The `Notification` hook uses `matcher: "permission_prompt"` rather than `matcher: "*"`.
+Using `"*"` fires on every internal notification Claude Code emits (tool results, sub-agent calls, etc.), causing the pane to flicker yellow on every tool use.
+`"permission_prompt"` restricts it to cases where Claude is actually waiting for user approval.
 
 ### 3. Start Claude inside a glowmux pane
 
