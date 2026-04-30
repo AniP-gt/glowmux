@@ -7,8 +7,10 @@ use std::thread;
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+mod pty_io;
+
 use crate::app::AppEvent;
-use crate::pty_io::pty_reader_thread;
+use self::pty_io::pty_reader_thread;
 use crate::shell::detect_shell;
 
 enum WriterMsg {
@@ -128,7 +130,7 @@ impl Pane {
                     } else {
                         format!("pane {} reader thread panicked (unknown payload)", id)
                     };
-                    crate::log::write_log("PANIC", &msg);
+                    crate::core::log::write_log("PANIC", &msg);
                 }
             })
             .context("Failed to spawn reader thread")?;
@@ -147,7 +149,7 @@ impl Pane {
                         WriterMsg::Shutdown => break,
                         WriterMsg::Data(chunk) => {
                             if w.write_all(&chunk).is_err() || w.flush().is_err() {
-                                crate::log::write_log(
+                                crate::core::log::write_log(
                                     "WARN",
                                     &format!("pane {} writer: PTY write failed, stopping", id),
                                 );
@@ -216,13 +218,13 @@ impl Pane {
                 // We drop this chunk to avoid blocking the main event loop.  A single
                 // dropped keystroke is visible to the user (character does not appear)
                 // which is a better outcome than the UI freezing entirely.
-                crate::log::write_log(
+                crate::core::log::write_log(
                     "WARN",
                     &format!("pane {} writer channel full — input dropped", self.id),
                 );
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
-                crate::log::write_log(
+                crate::core::log::write_log(
                     "WARN",
                     &format!("pane {} writer thread disconnected", self.id),
                 );
