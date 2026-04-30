@@ -251,6 +251,9 @@ impl App {
                     // Prefix + a: toggle AI title generation
                     self.ai_title_enabled = !self.ai_title_enabled;
                     self.config.features.ai_title = self.ai_title_enabled;
+                    if let Err(e) = self.config.save() {
+                        eprintln!("glowmux: config save error: {}", e);
+                    }
                     self.dirty = true;
                     return Ok(true);
                 } else if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::NONE {
@@ -405,6 +408,9 @@ impl App {
         if self.key_matches(key, &self.config.keybindings.ai_title_toggle) {
             self.ai_title_enabled = !self.ai_title_enabled;
             self.config.features.ai_title = self.ai_title_enabled;
+            if let Err(e) = self.config.save() {
+                eprintln!("glowmux: config save error: {}", e);
+            }
             self.dirty = true;
             return Ok(true);
         }
