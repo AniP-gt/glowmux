@@ -15,6 +15,7 @@ mod preview;
 mod pty_io;
 mod runtime;
 mod session;
+mod shell;
 mod ui;
 mod version_check;
 mod worktree;
