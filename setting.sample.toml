@@ -135,7 +135,14 @@ restore_claude = false
 save_path = "~/.config/glowmux/session.json"
 
 [keybindings]
+# Prefix key for all prefix-based shortcuts (e.g. prefix + e = horizontal split).
+# Change this to any key you like, e.g. "ctrl+a" or "ctrl+space".
 prefix = "ctrl+b"
+
+# When true, all ctrl+key and alt+key direct shortcuts are active in addition to
+# prefix-based shortcuts.  Set to false to disable them entirely and rely solely
+# on prefix sequences — useful if those keys conflict with your terminal or shell.
+direct_keys = true
 zoom = "alt+z"
 layout_cycle = "ctrl+space"
 layout_picker = "ctrl+l"
