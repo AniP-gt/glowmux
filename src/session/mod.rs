@@ -56,7 +56,7 @@ impl SessionData {
     }
 
     pub fn session_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("glowmux").join("session.json"))
+        dirs::home_dir().map(|h| h.join(".config").join("glowmux").join("session.json"))
     }
 }
 

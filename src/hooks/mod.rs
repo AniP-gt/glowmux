@@ -58,7 +58,7 @@ impl Drop for HookServerGuard {
 }
 
 pub fn socket_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("glowmux").join("hooks.sock"))
+    dirs::home_dir().map(|h| h.join(".config").join("glowmux").join("hooks.sock"))
 }
 
 pub async fn start_hook_server(tx: Sender<AppEvent>, socket_path: PathBuf) {

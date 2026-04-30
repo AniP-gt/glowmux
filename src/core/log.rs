@@ -7,10 +7,9 @@ use std::sync::OnceLock;
 static LOG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 
 pub fn log_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("glowmux")
-        .join("glowmux.log")
+    dirs::home_dir()
+        .map(|h| h.join(".local").join("share").join("glowmux").join("glowmux.log"))
+        .unwrap_or_else(|| PathBuf::from("glowmux.log"))
 }
 
 pub fn init() {

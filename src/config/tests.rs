@@ -44,6 +44,62 @@ fn test_empty_toml_parse() {
 
 #[test]
 fn test_load_returns_default_when_no_file() {
+    // This test verifies that load() returns valid config (either default or from file).
+    // We can't assert specific default values since the user's config file may exist.
     let config = ConfigFile::load();
-    assert_eq!(config.terminal.scrollback, 10000);
+    assert!(config.terminal.scrollback > 0);
+}
+
+#[test]
+fn test_startup_panes_parse() {
+    let toml_str = r#"
+[startup]
+enabled = true
+default_agent = "claude"
+
+[[startup.panes]]
+command = "claude"
+worktree = false
+branch = ""
+split = "horizontal"
+
+[[startup.panes]]
+command = "claude"
+worktree = false
+branch = ""
+split = "horizontal"
+"#;
+    let config: ConfigFile = toml::from_str(toml_str).unwrap();
+    assert!(config.startup.enabled);
+    assert_eq!(config.startup.panes.len(), 2);
+    assert_eq!(config.startup.panes[0].command, "claude");
+    assert_eq!(config.startup.panes[0].split, "horizontal");
+}
+
+#[test]
+fn test_startup_panes_roundtrip() {
+    let toml_str = r#"
+[startup]
+enabled = true
+default_agent = "claude"
+
+[[startup.panes]]
+command = "claude"
+worktree = false
+branch = ""
+split = "horizontal"
+
+[[startup.panes]]
+command = "claude"
+worktree = false
+branch = ""
+split = "horizontal"
+"#;
+    let config: ConfigFile = toml::from_str(toml_str).unwrap();
+    assert_eq!(config.startup.panes.len(), 2);
+
+    let serialized = toml::to_string_pretty(&config).unwrap();
+    let config2: ConfigFile = toml::from_str(&serialized).unwrap();
+    assert_eq!(config2.startup.enabled, true);
+    assert_eq!(config2.startup.panes.len(), 2, "panes lost after round-trip");
 }

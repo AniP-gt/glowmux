@@ -372,6 +372,13 @@ impl ConfigFile {
     }
 
     fn config_path() -> Option<PathBuf> {
+        // Prefer XDG-style ~/.config/glowmux/config.toml on all platforms.
+        // Fall back to dirs::config_dir() (e.g. ~/Library/Application Support on macOS)
+        // only when the XDG path is unavailable.
+        if let Some(home) = dirs::home_dir() {
+            let xdg = home.join(".config").join("glowmux").join("config.toml");
+            return Some(xdg);
+        }
         dirs::config_dir().map(|d| d.join("glowmux").join("config.toml"))
     }
 }
