@@ -76,6 +76,23 @@ impl App {
                     .load(std::sync::atomic::Ordering::Relaxed)
             })
             .unwrap_or(0);
+
+        // Word motion keys need screen content, handle before the static move_copy_cursor
+        if key.modifiers == KeyModifiers::NONE {
+            match key.code {
+                KeyCode::Char('w') | KeyCode::Char('e') | KeyCode::Char('b') => {
+                    let ch = match key.code {
+                        KeyCode::Char(c) => c,
+                        _ => unreachable!(),
+                    };
+                    self.move_copy_cursor_word(ch, pane_id);
+                    self.dirty = true;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         let action = Self::move_copy_cursor(self.copy_mode.as_mut().unwrap(), key, max_scrollback);
 
         match action {
@@ -90,6 +107,55 @@ impl App {
         }
         self.dirty = true;
         Ok(true)
+    }
+
+    fn get_row_text(&self, pane_id: usize, row: u16, scrollback_offset: usize) -> Vec<char> {
+        let parser_arc = match self.ws().panes.get(&pane_id) {
+            Some(p) => std::sync::Arc::clone(&p.parser),
+            None => return vec![],
+        };
+        let mut parser = match parser_arc.lock() {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        let orig = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(scrollback_offset);
+        let screen = parser.screen();
+        let cols = screen.size().1;
+        let mut chars = Vec::with_capacity(cols as usize);
+        for col in 0..cols {
+            let c = screen
+                .cell(row, col)
+                .and_then(|cell| cell.contents().chars().next())
+                .unwrap_or(' ');
+            chars.push(c);
+        }
+        parser.screen_mut().set_scrollback(orig);
+        chars
+    }
+
+    fn move_copy_cursor_word(&mut self, motion: char, pane_id: usize) {
+        let (row, col, scrollback, max_col) = match self.copy_mode.as_ref() {
+            Some(cm) => (
+                cm.cursor_row,
+                cm.cursor_col as usize,
+                cm.scrollback_offset,
+                cm.screen_cols.saturating_sub(1) as usize,
+            ),
+            None => return,
+        };
+
+        let row_text = self.get_row_text(pane_id, row, scrollback);
+
+        let new_col = match motion {
+            'w' => word_forward_start(&row_text, col, max_col),
+            'e' => word_forward_end(&row_text, col, max_col),
+            'b' => word_backward_start(&row_text, col),
+            _ => col,
+        };
+        if let Some(cm) = self.copy_mode.as_mut() {
+            cm.cursor_col = new_col as u16;
+        }
     }
 
     pub(super) fn move_copy_cursor(
@@ -272,4 +338,91 @@ impl App {
             ));
         }
     }
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+// Move to start of next word (vim `w`)
+fn word_forward_start(row: &[char], col: usize, max_col: usize) -> usize {
+    let mut pos = col;
+    if pos >= row.len() {
+        return max_col;
+    }
+    // skip current word chars
+    if is_word_char(row[pos]) {
+        while pos < row.len() && is_word_char(row[pos]) {
+            pos += 1;
+        }
+    } else if row[pos] != ' ' {
+        // skip non-word, non-space punctuation cluster
+        while pos < row.len() && !is_word_char(row[pos]) && row[pos] != ' ' {
+            pos += 1;
+        }
+    }
+    // skip whitespace
+    while pos < row.len() && row[pos] == ' ' {
+        pos += 1;
+    }
+    pos.min(max_col)
+}
+
+// Move to end of current/next word (vim `e`)
+fn word_forward_end(row: &[char], col: usize, max_col: usize) -> usize {
+    if row.is_empty() {
+        return max_col;
+    }
+    let mut pos = col;
+    // Determine if cursor is already at the end of a word/token.
+    // "At end" means the next char is a different class (or there is no next char).
+    let at_end = pos + 1 >= row.len()
+        || (is_word_char(row[pos]) && !is_word_char(row[pos + 1]))
+        || (!is_word_char(row[pos]) && row[pos] != ' ' && (is_word_char(row[pos + 1]) || row[pos + 1] == ' '));
+    if at_end && pos + 1 < row.len() {
+        pos += 1;
+    }
+    // skip whitespace
+    while pos < row.len() && row[pos] == ' ' {
+        pos += 1;
+    }
+    // move to end of this word/token
+    if pos < row.len() {
+        if is_word_char(row[pos]) {
+            while pos + 1 < row.len() && is_word_char(row[pos + 1]) {
+                pos += 1;
+            }
+        } else {
+            while pos + 1 < row.len() && !is_word_char(row[pos + 1]) && row[pos + 1] != ' ' {
+                pos += 1;
+            }
+        }
+    }
+    pos.min(max_col)
+}
+
+// Move to start of previous word (vim `b`)
+fn word_backward_start(row: &[char], col: usize) -> usize {
+    if col == 0 || row.is_empty() {
+        return 0;
+    }
+    let mut pos = col.saturating_sub(1);
+    // skip whitespace
+    while pos > 0 && row[pos] == ' ' {
+        pos -= 1;
+    }
+    if pos == 0 {
+        return 0;
+    }
+    // go back through current word
+    if is_word_char(row[pos]) {
+        while pos > 0 && is_word_char(row[pos - 1]) {
+            pos -= 1;
+        }
+    } else {
+        while pos > 0 && !is_word_char(row[pos - 1]) && row[pos - 1] != ' ' {
+            pos -= 1;
+        }
+    }
+    pos
 }
