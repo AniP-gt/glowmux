@@ -77,24 +77,189 @@ impl App {
                 self.dirty = true;
                 if key.modifiers == prefix_mods && key.code == prefix_code {
                     // Prefix pressed twice: fall through to PTY passthrough
-                } else if crate::keybinding::parse_keybinding(&self.config.keybindings.quit)
-                    .map(|(_, code)| key.code == code)
-                    .unwrap_or(false)
+                } else if self.key_matches(key, &self.config.keybindings.quit.clone())
+                    || (key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Char('q'))
                 {
                     self.should_quit = true;
                     return Ok(true);
-                } else if crate::keybinding::parse_keybinding(&self.config.keybindings.layout_cycle)
-                    .map(|(_, code)| key.code == code)
-                    .unwrap_or(false)
+                } else if self.key_matches(key, &self.config.keybindings.layout_cycle.clone())
+                    || (key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Char(' '))
                 {
-                    // Prefix + layout_cycle key — cycle layout mode
                     self.cycle_layout_mode();
                     return Ok(true);
                 } else if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::NONE {
                     self.enter_copy_mode();
                     return Ok(true);
-                } else if key.code == KeyCode::Char('w') {
+                } else if key.code == KeyCode::Char('w') && key.modifiers == KeyModifiers::NONE {
                     self.open_pane_list_overlay();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + e: horizontal split
+                    self.split_focused_pane(SplitDirection::Horizontal)?;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + d: vertical split
+                    self.split_focused_pane(SplitDirection::Vertical)?;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target == FocusTarget::Preview {
+                        self.preview_zoomed = false;
+                        self.ws_mut().preview.close();
+                        self.ws_mut().focus_target = FocusTarget::Pane;
+                        return Ok(true);
+                    }
+                    let multi_pane = self.ws().layout.pane_count() > 1;
+                    let multi_tab = self.workspaces.len() > 1;
+                    if multi_pane || multi_tab {
+                        let pane_id = self.ws().focused_pane_id;
+                        if self.config.worktree.close_confirm {
+                            let worktree_path = self
+                                .ws()
+                                .panes
+                                .get(&pane_id)
+                                .and_then(|p| p.worktree_path.clone());
+                            self.close_confirm_dialog = CloseConfirmDialog {
+                                visible: true,
+                                pane_id,
+                                worktree_path,
+                                focused: CloseConfirmFocus::No,
+                            };
+                            self.dirty = true;
+                        } else if multi_pane {
+                            self.close_focused_pane();
+                        } else {
+                            self.close_tab(self.active_tab);
+                        }
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + t: new tab
+                    self.new_tab()?;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('n') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + n: open pane create dialog
+                    let agent_labels: Vec<String> = self
+                        .config
+                        .multi_ai
+                        .agents
+                        .iter()
+                        .map(|a| format!("{} ({})", a.name, a.command))
+                        .collect();
+                    let agent_checks = vec![false; self.config.multi_ai.agents.len()];
+                    self.pane_create_dialog = PaneCreateDialog {
+                        visible: true,
+                        worktree_enabled: self.config.worktree.auto_create,
+                        agent: self.config.startup.default_agent.clone(),
+                        focused_field: PaneCreateField::BranchName,
+                        base_branch: self.config.worktree.base_branch.clone(),
+                        agent_checks,
+                        agent_labels,
+                        ..Default::default()
+                    };
+                    self.dirty = true;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('h') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target == FocusTarget::Pane {
+                        self.focus_pane_in_direction(Direction::Left);
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target == FocusTarget::Pane {
+                        self.focus_pane_in_direction(Direction::Right);
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('k') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target == FocusTarget::Pane {
+                        self.focus_pane_in_direction(Direction::Up);
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target == FocusTarget::Pane {
+                        self.focus_pane_in_direction(Direction::Down);
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + p: toggle pane list sidebar
+                    self.toggle_pane_list_sidebar();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('f') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + f: toggle file tree
+                    self.toggle_file_tree();
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + r: tab rename
+                    if self.pane_rename_input.is_none() {
+                        self.rename_input = Some(String::new());
+                        if !self.status_bar_visible {
+                            self.mark_layout_change();
+                        }
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('R')
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    // Prefix + R: pane rename
+                    if self.rename_input.is_none() {
+                        let target_id = self.zoomed_pane_id.unwrap_or(self.ws().focused_pane_id);
+                        self.pane_rename_input = Some((target_id, String::new()));
+                        if !self.status_bar_visible {
+                            self.mark_layout_change();
+                        }
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::NONE {
+                    if self.ws().focus_target != FocusTarget::Preview {
+                        self.toggle_zoom();
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char(',') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + ,: settings panel
+                    self.settings_panel.visible = true;
+                    self.settings_panel.selected = 0;
+                    self.settings_panel.editing = false;
+                    self.settings_panel.edit_buffer.clear();
+                    self.dirty = true;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('l') && key.modifiers == KeyModifiers::CONTROL {
+                    // Prefix + ctrl+l: layout picker (mirrors direct ctrl+l)
+                    if self.ws().layout.pane_count() > 1 {
+                        self.layout_picker.visible = true;
+                        self.layout_picker.selected = 0;
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + Tab: next tab
+                    if !self.workspaces.is_empty() {
+                        self.reset_pane_list_sidebar_if_active();
+                        self.active_tab = (self.active_tab + 1) % self.workspaces.len();
+                        self.on_workspace_focus_context_changed();
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::BackTab && key.modifiers == KeyModifiers::SHIFT {
+                    // Prefix + Shift+Tab: previous tab
+                    if !self.workspaces.is_empty() {
+                        self.reset_pane_list_sidebar_if_active();
+                        self.active_tab = if self.active_tab == 0 {
+                            self.workspaces.len() - 1
+                        } else {
+                            self.active_tab - 1
+                        };
+                        self.on_workspace_focus_context_changed();
+                    }
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('a') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + a: toggle AI title generation
+                    self.ai_title_enabled = !self.ai_title_enabled;
+                    self.config.features.ai_title = self.ai_title_enabled;
+                    self.dirty = true;
+                    return Ok(true);
+                } else if key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::NONE {
+                    // Prefix + s: toggle status bar
+                    self.status_bar_visible = !self.status_bar_visible;
+                    self.mark_layout_change();
+                    return Ok(true);
+                } else {
+                    // Unknown prefix combo: consume the key silently
                     return Ok(true);
                 }
             }
