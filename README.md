@@ -2,7 +2,6 @@
 
 Manage multiple Claude Code or shell sessions in one Rust TUI.
 
-![glowmux screenshot](screenshot.png)
 
 ## What it does
 
