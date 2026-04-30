@@ -115,6 +115,7 @@ pub struct SessionConfig {
 #[serde(default)]
 pub struct KeybindingsConfig {
     pub prefix: String,
+    pub direct_keys: bool,
     pub zoom: String,
     pub layout_cycle: String,
     pub layout_picker: String,
@@ -234,10 +235,50 @@ impl Default for SessionConfig {
     }
 }
 
+impl KeybindingsConfig {
+    /// Clear all bindings that start with a modifier key (`ctrl+` or `alt+`).
+    /// Called when `direct_keys = false` so only prefix-based shortcuts remain.
+    pub fn clear_direct_keys(&mut self) {
+        for field in [
+            &mut self.zoom,
+            &mut self.layout_cycle,
+            &mut self.layout_picker,
+            &mut self.pane_left,
+            &mut self.pane_right,
+            &mut self.pane_up,
+            &mut self.pane_down,
+            &mut self.quit,
+            &mut self.tab_rename,
+            &mut self.pane_rename,
+            &mut self.tab_new,
+            &mut self.tab_next,
+            &mut self.tab_prev,
+            &mut self.settings,
+            &mut self.file_tree,
+            &mut self.preview_swap,
+            &mut self.split_vertical,
+            &mut self.split_horizontal,
+            &mut self.pane_close,
+            &mut self.pane_create,
+            &mut self.clipboard_copy,
+            &mut self.ai_title_toggle,
+            &mut self.pane_next,
+            &mut self.pane_prev,
+            &mut self.pane_list,
+        ] {
+            let lower = field.to_ascii_lowercase();
+            if lower.starts_with("ctrl+") || lower.starts_with("alt+") {
+                field.clear();
+            }
+        }
+    }
+}
+
 impl Default for KeybindingsConfig {
     fn default() -> Self {
         Self {
             prefix: "ctrl+b".to_string(),
+            direct_keys: true,
             zoom: "alt+z".to_string(),
             layout_cycle: "ctrl+space".to_string(),
             layout_picker: "ctrl+l".to_string(),
@@ -294,6 +335,9 @@ impl ConfigFile {
                     Ok(content) => match toml::from_str::<ConfigFile>(&content) {
                         Ok(mut config) => {
                             config.multi_ai = config.multi_ai.validated();
+                            if !config.keybindings.direct_keys {
+                                config.keybindings.clear_direct_keys();
+                            }
                             return config;
                         }
                         Err(e) => {
