@@ -12,6 +12,7 @@ mod keybinding;
 pub mod log;
 mod pane;
 mod preview;
+mod pty_io;
 mod runtime;
 mod session;
 mod ui;
