@@ -1,19 +1,16 @@
-mod ai_invoke;
-mod ai_title;
+mod ai;
 mod app;
 mod claude_monitor;
 mod config;
+mod core;
 mod filetree;
 mod git_diff;
 mod git_exec;
 mod git_status;
 mod hooks;
 mod keybinding;
-pub mod log;
 mod pane;
 mod preview;
-mod pty_io;
-mod runtime;
 mod session;
 mod shell;
 mod ui;
@@ -55,7 +52,7 @@ fn main() -> Result<()> {
     }
 
     // Initialize file logger
-    log::init();
+    core::log::init();
 
     // Install panic hook to restore terminal state on crash
     let default_hook = panic::take_hook();
@@ -65,12 +62,12 @@ fn main() -> Result<()> {
         let _ = execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let msg = format!("PANIC: {}", info);
-        log::write_log("PANIC", &msg);
+        core::log::write_log("PANIC", &msg);
         default_hook(info);
     }));
 
     // Initialize async runtime BEFORE raw mode
-    let async_runtime = runtime::AsyncRuntime::new()?;
+    let async_runtime = core::runtime::AsyncRuntime::new()?;
 
     // Query terminal for graphics protocol support BEFORE raw mode.
     // Falls back to halfblocks if detection fails.
@@ -186,7 +183,7 @@ fn run_event_loop(
         }
 
         if app.should_quit {
-            log::write_log("INFO", "glowmux exiting normally");
+            core::log::write_log("INFO", "glowmux exiting normally");
             break;
         }
 

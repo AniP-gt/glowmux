@@ -87,20 +87,20 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
-        $crate::log::write_log("INFO", &format!($($arg)*));
+        $crate::core::log::write_log("INFO", &format!($($arg)*));
     };
 }
 
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
-        $crate::log::write_log("WARN", &format!($($arg)*));
+        $crate::core::log::write_log("WARN", &format!($($arg)*));
     };
 }
 
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {
-        $crate::log::write_log("ERROR", &format!($($arg)*));
+        $crate::core::log::write_log("ERROR", &format!($($arg)*));
     };
 }
